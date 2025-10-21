@@ -1,0 +1,20 @@
+# Telegram Bot
+aiogram>=3.7.0
+aiohttp>=3.9.5
+
+# Data Collection
+twelvedata[pandas]>=1.2.25
+
+# AI Integration
+openai>=1.35.3
+
+# Environment Variables
+python-dotenv>=1.0.1
+
+# Database (built-in sqlite3)
+# Database utils
+aiosqlite>=0.20.0
+
+# Utilities
+requests>=2.32.3
+
