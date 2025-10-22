@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS users (
     is_premium INTEGER DEFAULT 0,
     premium_until TIMESTAMP,
     analyses_count_today INTEGER DEFAULT 0,
-    last_analysis_date DATE
+    last_analysis_date DATE,
+    additional_analyses INTEGER DEFAULT 0
 )
 """
 
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     FOREIGN KEY (user_id) REFERENCES users (user_id)
 )
 """
+
 
 # Индексы для оптимизации
 CREATE_INDICES = [

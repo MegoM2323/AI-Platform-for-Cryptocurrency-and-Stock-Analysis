@@ -132,8 +132,11 @@ def debug_info():
     print("Конфигурация:")
     print(f"  Database Path: {config.DATABASE_PATH}")
     print(f"  AI Model: {config.AI_MODEL}")
-    print(f"  Free Analyses: {config.FREE_ANALYSES_PER_DAY}")
-    print(f"  Premium Analyses: {config.PREMIUM_ANALYSES_PER_DAY}")
+    print(f"  Free Analyses: {config.FREE_ANALYSES_PER_MONTH}/month")
+    print(f"  Basic Analyses: {config.BASIC_ANALYSES_PER_MONTH}/month")
+    print(f"  Trader Analyses: {config.TRADER_ANALYSES_PER_MONTH}/month")
+    print(f"  Pro Analyses: {config.PRO_ANALYSES_PER_MONTH}/month")
+    print(f"  Elite Analyses: {config.ELITE_ANALYSES_PER_MONTH}/month")
     print()
     
     # Переменные окружения

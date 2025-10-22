@@ -44,12 +44,12 @@ async def cmd_start(message: Message, state: FSMContext, db: Database):
 /profile - Твой профиль
 /subscribe - Управление подпиской
 
-<b>Бесплатный план:</b>
-🎁 {config.FREE_ANALYSES_PER_DAY} анализов в день
-
-<b>Premium план:</b>
-💎 {config.PREMIUM_ANALYSES_PER_DAY} анализов в день
-✨ Расширенная аналитика
+<b>Тарифные планы:</b>
+🆓 Free: {config.FREE_ANALYSES_PER_MONTH} анализов в месяц
+🥉 Basic: {config.BASIC_ANALYSES_PER_MONTH} анализов в месяц - 299₽
+🥈 Trader: {config.TRADER_ANALYSES_PER_MONTH} анализов в месяц - 899₽
+🥇 Pro: {config.PRO_ANALYSES_PER_MONTH} анализов в месяц - 1590₽
+💎 Elite: {config.ELITE_ANALYSES_PER_MONTH} анализов в месяц - 2990₽
 
 Выбери действие из меню ниже 👇
 """
@@ -61,8 +61,8 @@ async def cmd_start(message: Message, state: FSMContext, db: Database):
     )
 
 
-@router.message(Command("help"))
 @router.message(F.text == "❓ Помощь")
+@router.message(Command("help"))
 async def cmd_help(message: Message, state: FSMContext):
     """Обработчик команды /help"""
     await state.clear()
@@ -113,8 +113,8 @@ async def cmd_help(message: Message, state: FSMContext):
     )
 
 
-@router.message(Command("profile"))
 @router.message(F.text == "📈 Мой профиль")
+@router.message(Command("profile"))
 async def cmd_profile(message: Message, db: Database):
     """Показать профиль пользователя"""
     user_id = message.from_user.id
@@ -124,14 +124,32 @@ async def cmd_profile(message: Message, db: Database):
         await message.answer("❌ Пользователь не найден. Используй /start")
         return
     
+    # Получаем план подписки
+    subscription_plan = await db.get_user_subscription_plan(user_id)
+    
+    # Определяем лимиты в зависимости от плана
+    if subscription_plan == 'free':
+        max_analyses = config.FREE_ANALYSES_PER_MONTH
+    elif subscription_plan == 'basic':
+        max_analyses = config.BASIC_ANALYSES_PER_MONTH
+    elif subscription_plan == 'trader':
+        max_analyses = config.TRADER_ANALYSES_PER_MONTH
+    elif subscription_plan == 'pro':
+        max_analyses = config.PRO_ANALYSES_PER_MONTH
+    elif subscription_plan == 'elite':
+        max_analyses = config.ELITE_ANALYSES_PER_MONTH
+    else:
+        max_analyses = config.FREE_ANALYSES_PER_MONTH
+    
     # Получаем оставшиеся анализы
     remaining = await db.get_remaining_analyses(
         user_id, 
-        config.FREE_ANALYSES_PER_DAY,
-        config.PREMIUM_ANALYSES_PER_DAY
+        config.FREE_ANALYSES_PER_MONTH,
+        max_analyses
     )
     
-    # Проверяем премиум статус
+    # Получаем информацию о тарифе
+    plan_name = config.SUBSCRIPTION_PLANS.get(subscription_plan, {}).get('name', 'Free')
     is_premium = user_data.get('is_premium', 0)
     premium_text = "✅ Активна" if is_premium else "❌ Не активна"
     
@@ -139,6 +157,11 @@ async def cmd_profile(message: Message, db: Database):
         from datetime import datetime
         premium_until = datetime.fromisoformat(user_data['premium_until'])
         premium_text += f"\n📅 До: {premium_until.strftime('%d.%m.%Y')}"
+    
+    # Получаем количество анализов за месяц
+    from datetime import date
+    current_month = date.today().replace(day=1)
+    monthly_analyses = await db.get_monthly_analyses_count(user_id, current_month)
     
     # Получаем историю анализов
     analyses = await db.get_user_analyses(user_id, limit=5)
@@ -150,11 +173,13 @@ async def cmd_profile(message: Message, db: Database):
 <b>Имя:</b> {user_data.get('first_name', 'N/A')}
 <b>Username:</b> @{user_data.get('username', 'N/A')}
 
-💎 <b>Premium подписка:</b> {premium_text}
+💎 <b>Тариф:</b> {plan_name}
+<b>Статус:</b> {premium_text}
 
-📊 <b>Анализы сегодня:</b>
+📊 <b>Анализы в месяце:</b>
 • Осталось: {remaining}
-• Использовано: {user_data.get('analyses_count_today', 0)}
+• Использовано: {monthly_analyses}
+• Лимит: {max_analyses}
 
 📈 <b>Последние анализы ({len(analyses)}):</b>
 """

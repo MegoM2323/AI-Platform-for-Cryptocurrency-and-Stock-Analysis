@@ -17,34 +17,50 @@ from AI_block import AIAnalyzer
 router = Router()
 
 
-@router.message(Command("analyze"))
 @router.message(F.text == "📊 Анализ токена")
+@router.message(Command("analyze"))
 async def start_analysis(message: Message, state: FSMContext, db: Database):
     """Начать процесс анализа"""
     user_id = message.from_user.id
     
+    # Получаем план подписки пользователя
+    subscription_plan = await db.get_user_subscription_plan(user_id)
+    
+    # Определяем лимиты в зависимости от плана
+    if subscription_plan == 'free':
+        max_analyses = config.FREE_ANALYSES_PER_MONTH
+    elif subscription_plan == 'basic':
+        max_analyses = config.BASIC_ANALYSES_PER_MONTH
+    elif subscription_plan == 'trader':
+        max_analyses = config.TRADER_ANALYSES_PER_MONTH
+    elif subscription_plan == 'pro':
+        max_analyses = config.PRO_ANALYSES_PER_MONTH
+    elif subscription_plan == 'elite':
+        max_analyses = config.ELITE_ANALYSES_PER_MONTH
+    else:
+        max_analyses = config.FREE_ANALYSES_PER_MONTH
+    
     # Проверяем лимит анализов
     can_analyze = await db.check_analysis_limit(
         user_id,
-        config.FREE_ANALYSES_PER_DAY,
-        config.PREMIUM_ANALYSES_PER_DAY
+        config.FREE_ANALYSES_PER_MONTH,
+        max_analyses
     )
     
     if not can_analyze:
-        user_data = await db.get_user(user_id)
-        is_premium = user_data.get('is_premium', 0)
+        plan_name = config.SUBSCRIPTION_PLANS.get(subscription_plan, {}).get('name', 'Free')
         
         limit_text = f"""
 ❌ <b>Лимит анализов исчерпан!</b>
 
-Ты использовал все доступные анализы на сегодня.
+Ты использовал все доступные анализы в этом месяце.
 
-{'💎 Premium: ' + str(config.PREMIUM_ANALYSES_PER_DAY) + ' анализов/день' if is_premium else '🎁 Бесплатно: ' + str(config.FREE_ANALYSES_PER_DAY) + ' анализов/день'}
+<b>Твой тариф:</b> {plan_name}
+<b>Лимит:</b> {max_analyses} анализов в месяц
 
 <b>Что можно сделать:</b>
-• Подождать до завтра
-• Оформить Premium подписку (/subscribe)
-• Докупить анализы
+• Подождать до следующего месяца
+• Оформить подписку на более высокий тариф (/subscribe)
 
 Используй /subscribe для улучшения тарифа
 """
@@ -58,14 +74,14 @@ async def start_analysis(message: Message, state: FSMContext, db: Database):
     # Получаем оставшиеся анализы
     remaining = await db.get_remaining_analyses(
         user_id,
-        config.FREE_ANALYSES_PER_DAY,
-        config.PREMIUM_ANALYSES_PER_DAY
+        config.FREE_ANALYSES_PER_MONTH,
+        max_analyses
     )
     
     await state.set_state(AnalysisStates.waiting_for_symbol)
     await message.answer(
         f"📊 <b>Анализ криптовалюты</b>\n\n"
-        f"Осталось анализов сегодня: <b>{remaining - 1}</b>\n\n"
+        f"Осталось анализов в месяце: <b>{remaining - 1}</b>\n\n"
         f"Введи символ криптовалюты для анализа\n"
         f"(например: BTC, ETH, SOL, BNB)\n\n"
         f"Или нажми \"Отмена\" для выхода",

@@ -63,20 +63,6 @@ class Database:
         if not user:
             return False
         
-        # Проверяем, не новый ли день
-        today = date.today()
-        last_date = user.get('last_analysis_date')
-        
-        if last_date:
-            last_date = datetime.strptime(last_date, '%Y-%m-%d').date()
-            if last_date < today:
-                # Новый день - сбрасываем счетчик
-                await self.reset_daily_analyses(user_id)
-                user['analyses_count_today'] = 0
-        
-        # Проверяем лимит
-        count = user.get('analyses_count_today', 0)
-        
         # Проверяем премиум статус
         is_premium = user.get('is_premium', 0)
         if is_premium:
@@ -88,20 +74,14 @@ class Database:
                     await self.revoke_premium(user_id)
                     is_premium = 0
         
-        limit = max_premium if is_premium else max_free
-        return count < limit
+        # Получаем оставшиеся анализы в месяце
+        remaining = await self.get_remaining_analyses(user_id, max_free, max_premium)
+        return remaining > 0
     
     async def increment_analysis_count(self, user_id: int):
-        """Увеличить счетчик анализов на сегодня"""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                """UPDATE users 
-                   SET analyses_count_today = analyses_count_today + 1,
-                       last_analysis_date = DATE('now')
-                   WHERE user_id = ?""",
-                (user_id,)
-            )
-            await db.commit()
+        """Увеличить счетчик анализов (теперь не нужен, так как считаем по месяцам)"""
+        # Метод оставлен для совместимости, но логика теперь в get_remaining_analyses
+        pass
     
     async def reset_daily_analyses(self, user_id: int):
         """Сбросить счетчик анализов на сегодня"""
@@ -174,15 +154,104 @@ class Database:
             )
             await db.commit()
     
+    
     async def get_remaining_analyses(self, user_id: int, max_free: int, max_premium: int) -> int:
-        """Получить количество оставшихся анализов на сегодня"""
+        """Получить количество оставшихся анализов в месяце"""
         user = await self.get_user(user_id)
         if not user:
             return 0
         
-        count = user.get('analyses_count_today', 0)
-        is_premium = user.get('is_premium', 0)
+        # Получаем количество анализов за текущий месяц
+        from datetime import datetime, date
+        current_month = date.today().replace(day=1)
         
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT COUNT(*) as count FROM analyses 
+                   WHERE user_id = ? AND DATE(created_at) >= ?""",
+                (user_id, current_month.isoformat())
+            ) as cursor:
+                row = await cursor.fetchone()
+                monthly_count = row['count'] if row else 0
+        
+        is_premium = user.get('is_premium', 0)
         limit = max_premium if is_premium else max_free
-        return max(0, limit - count)
+        return max(0, limit - monthly_count)
+    
+    async def add_analyses(self, user_id: int, count: int):
+        """Добавить дополнительные анализы пользователю"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """UPDATE users 
+                   SET additional_analyses = additional_analyses + ?
+                   WHERE user_id = ?""",
+                (count, user_id)
+            )
+            await db.commit()
+    
+    async def get_additional_analyses(self, user_id: int) -> int:
+        """Получить количество дополнительных анализов"""
+        user = await self.get_user(user_id)
+        if not user:
+            return 0
+        return user.get('additional_analyses', 0)
+    
+    async def get_monthly_analyses_count(self, user_id: int, month_start: date) -> int:
+        """Получить количество анализов за месяц"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT COUNT(*) as count FROM analyses 
+                   WHERE user_id = ? AND DATE(created_at) >= ?""",
+                (user_id, month_start.isoformat())
+            ) as cursor:
+                row = await cursor.fetchone()
+                return row['count'] if row else 0
+    
+    async def use_additional_analysis(self, user_id: int) -> bool:
+        """Использовать дополнительный анализ"""
+        user = await self.get_user(user_id)
+        if not user:
+            return False
+        
+        additional = user.get('additional_analyses', 0)
+        if additional <= 0:
+            return False
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """UPDATE users 
+                   SET additional_analyses = additional_analyses - 1
+                   WHERE user_id = ?""",
+                (user_id,)
+            )
+            await db.commit()
+        return True
+    
+    async def get_user_subscription_plan(self, user_id: int) -> str:
+        """Получить план подписки пользователя"""
+        user = await self.get_user(user_id)
+        if not user:
+            return 'free'
+        
+        # Проверяем премиум статус
+        is_premium = user.get('is_premium', 0)
+        if is_premium:
+            premium_until = user.get('premium_until')
+            if premium_until:
+                try:
+                    premium_until_dt = datetime.fromisoformat(premium_until.replace('Z', '+00:00'))
+                    if premium_until_dt > datetime.now():
+                        # Определяем тип подписки по количеству анализов
+                        # Это упрощенная логика, можно расширить
+                        return 'premium'
+                    else:
+                        # Премиум истек
+                        await self.revoke_premium(user_id)
+                        return 'free'
+                except:
+                    return 'free'
+        
+        return 'free'
 

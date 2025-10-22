@@ -18,3 +18,9 @@ aiosqlite>=0.20.0
 # Utilities
 requests>=2.32.3
 
+# Payment System
+aiohttp>=3.9.5
+
+# Crypto Payment System (NOWPayments)
+# Все необходимые зависимости уже включены в aiohttp
+
