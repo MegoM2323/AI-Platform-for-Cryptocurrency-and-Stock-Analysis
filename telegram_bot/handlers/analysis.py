@@ -103,11 +103,28 @@ async def cancel_analysis(message: Message, state: FSMContext):
 @router.message(AnalysisStates.waiting_for_symbol)
 async def process_symbol(message: Message, state: FSMContext, db: Database):
     """Обработать введенный символ и выполнить анализ"""
+    import logging
+    logger = logging.getLogger(__name__)
+    
     symbol = message.text.strip().upper()
     user_id = message.from_user.id
     
+    logger.info(f"Пользователь {user_id} запросил анализ {symbol}")
+    
+    # Проверяем, что пользователь действительно в состоянии ожидания символа
+    current_state = await state.get_state()
+    if current_state != AnalysisStates.waiting_for_symbol:
+        logger.warning(f"Пользователь {user_id} не в состоянии ожидания символа. Текущее состояние: {current_state}")
+        await message.answer(
+            "❌ Неожиданное состояние. Пожалуйста, начни анализ заново.",
+            reply_markup=get_main_keyboard()
+        )
+        await state.clear()
+        return
+    
     # Проверяем формат
     if len(symbol) > 10 or not symbol.isalnum():
+        logger.warning(f"Неверный формат символа от пользователя {user_id}: {symbol}")
         await message.answer(
             "❌ Неверный формат символа.\n"
             "Введи корректный символ (например: BTC, ETH)"
@@ -122,6 +139,8 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
     )
     
     try:
+        logger.info(f"Начинаем сбор данных для {symbol}")
+        
         # Собираем данные
         collector = CryptoCollector(
             timeframe=config.DEFAULT_TIMEFRAME,
@@ -129,7 +148,9 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
         )
         
         # Проверяем существование токена
+        logger.info(f"Проверяем валидность символа {symbol}")
         if not collector.validate_symbol(symbol):
+            logger.warning(f"Символ {symbol} не прошел валидацию")
             await processing_msg.edit_text(
                 f"❌ Криптовалюта {symbol} не найдена.\n\n"
                 f"Проверь правильность символа и попробуй снова.\n"
@@ -138,20 +159,28 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
             return
         
         # Получаем данные
+        logger.info(f"Получаем исторические данные для {symbol}")
         data = collector.get_crypto_data(symbol)
         if data is None or data.empty:
+            logger.error(f"Не удалось получить данные для {symbol}")
             await processing_msg.edit_text(
                 f"❌ Не удалось получить данные для {symbol}"
             )
             return
         
+        logger.info(f"Данные получены: {data.shape[0]} записей")
+        
         current_price = collector.get_current_price(symbol)
+        logger.info(f"Текущая цена {symbol}: {current_price}")
         
         # Форматируем данные
+        logger.info("Форматируем данные для анализа")
         formatter = DataFormatter()
         formatted_data = formatter.format_for_analysis(data, symbol, current_price)
+        logger.info(f"Данные отформатированы: {len(formatted_data)} символов")
         
         # Выполняем AI анализ
+        logger.info("Запускаем AI анализ")
         analyzer = AIAnalyzer(
             api_key=config.OPENROUTER_API_KEY,
             model=config.AI_MODEL
@@ -160,16 +189,20 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
         analysis_result = await analyzer.analyze_crypto(formatted_data, symbol)
         
         if analysis_result is None:
+            logger.error(f"AI анализ не вернул результат для {symbol}")
             await processing_msg.edit_text(
                 "❌ Ошибка при выполнении анализа.\n"
                 "Попробуй позже."
             )
             return
         
+        logger.info(f"AI анализ завершен: {len(analysis_result)} символов")
+        
         # Увеличиваем счетчик анализов
         await db.increment_analysis_count(user_id)
         
         # Сохраняем анализ в БД
+        logger.info("Сохраняем анализ в базу данных")
         await db.save_analysis(user_id, symbol, analysis_result)
         
         # Отправляем результат
@@ -180,9 +213,10 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
         # Разбиваем длинное сообщение, если нужно
         if len(analysis_result) > 4096:
             # Telegram ограничивает сообщения до 4096 символов
+            logger.info(f"Разбиваем длинное сообщение на части")
             chunks = [analysis_result[i:i+4096] for i in range(0, len(analysis_result), 4096)]
-            for chunk in chunks:
-                await message.answer(chunk, parse_mode="HTML")
+            for i, chunk in enumerate(chunks):
+                await message.answer(f"📄 Часть {i+1}/{len(chunks)}\n\n{chunk}", parse_mode="HTML")
         else:
             await message.answer(analysis_result, parse_mode="HTML")
         
@@ -193,11 +227,13 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
             reply_markup=get_main_keyboard()
         )
         
+        logger.info(f"Анализ {symbol} успешно завершен для пользователя {user_id}")
+        
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
-        print(f"Error in analysis: {e}")
-        print(f"Full traceback: {error_details}")
+        logger.error(f"Ошибка при анализе {symbol} для пользователя {user_id}: {e}")
+        logger.error(f"Полная ошибка: {error_details}")
         
         # Отправляем детальную ошибку в debug режиме
         if config.DEBUG_MODE:
