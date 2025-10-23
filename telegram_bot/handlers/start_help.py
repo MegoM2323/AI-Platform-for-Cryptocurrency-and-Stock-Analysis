@@ -163,6 +163,9 @@ async def cmd_profile(message: Message, db: Database):
     current_month = date.today().replace(day=1)
     monthly_analyses = await db.get_monthly_analyses_count(user_id, current_month)
     
+    # Получаем дополнительные анализы из БД
+    additional_analyses = user_data.get('additional_analyses', 0)
+    
     # Получаем историю анализов
     analyses = await db.get_user_analyses(user_id, limit=5)
     
@@ -176,10 +179,10 @@ async def cmd_profile(message: Message, db: Database):
 💎 <b>Тариф:</b> {plan_name}
 <b>Статус:</b> {premium_text}
 
-📊 <b>Анализы в месяце:</b>
-• Осталось: {remaining}
+📊 <b>Анализы:</b>
+• Лимит в месяц: {max_analyses}
 • Использовано: {monthly_analyses}
-• Лимит: {max_analyses}
+• Осталось в месяце: {max(0, max_analyses - monthly_analyses)}
 
 📈 <b>Последние анализы ({len(analyses)}):</b>
 """
