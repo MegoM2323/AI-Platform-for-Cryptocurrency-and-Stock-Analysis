@@ -71,7 +71,7 @@ class Config:
         'trader': {
             'name': 'Trader',
             'days': 30,
-            'price': 1,
+            'price': 899,
             'analyses_per_month': 50,
             'features': ['50 анализов в месяц', 'Расширенный анализ']
         },
