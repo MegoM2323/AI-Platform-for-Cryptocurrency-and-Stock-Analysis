@@ -37,6 +37,17 @@ async def start_analysis(message: Message, state: FSMContext, db: Database):
         max_analyses = config.PRO_ANALYSES_PER_MONTH
     elif subscription_plan == 'elite':
         max_analyses = config.ELITE_ANALYSES_PER_MONTH
+    elif subscription_plan == 'premium':
+        # Для общего премиум статуса определяем по дополнительным анализам
+        additional_analyses = await db.get_additional_analyses(user_id)
+        if additional_analyses >= 500:
+            max_analyses = config.ELITE_ANALYSES_PER_MONTH
+        elif additional_analyses >= 150:
+            max_analyses = config.PRO_ANALYSES_PER_MONTH
+        elif additional_analyses >= 50:
+            max_analyses = config.TRADER_ANALYSES_PER_MONTH
+        else:
+            max_analyses = config.BASIC_ANALYSES_PER_MONTH
     else:
         max_analyses = config.FREE_ANALYSES_PER_MONTH
     
@@ -50,7 +61,44 @@ async def start_analysis(message: Message, state: FSMContext, db: Database):
     if not can_analyze:
         plan_name = config.SUBSCRIPTION_PLANS.get(subscription_plan, {}).get('name', 'Free')
         
-        limit_text = f"""
+        # Получаем оставшиеся анализы
+        remaining = await db.get_remaining_analyses(
+            user_id,
+            config.FREE_ANALYSES_PER_MONTH,
+            max_analyses
+        )
+        
+        # Проверяем дополнительные анализы
+        additional_analyses = await db.get_additional_analyses(user_id)
+        
+        if additional_analyses > 0:
+            # Есть дополнительные анализы, предлагаем их использовать
+            limit_text = f"""
+❌ <b>Лимит анализов исчерпан!</b>
+
+Ты использовал все доступные анализы в этом месяце.
+
+<b>Твой тариф:</b> {plan_name}
+<b>Лимит:</b> {max_analyses} анализов в месяц
+<b>Дополнительные анализы:</b> {additional_analyses}
+
+У тебя есть дополнительные анализы! Хочешь использовать один?
+"""
+            from ..keyboards import InlineKeyboardMarkup, InlineKeyboardButton
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Использовать дополнительный анализ", callback_data=f"use_additional_analysis_{user_id}")],
+                [InlineKeyboardButton(text="💎 Купить подписку", callback_data="show_subscriptions")],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_analysis")]
+            ])
+            
+            await message.answer(
+                limit_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+        else:
+            # Нет дополнительных анализов, предлагаем подписку
+            limit_text = f"""
 ❌ <b>Лимит анализов исчерпан!</b>
 
 Ты использовал все доступные анализы в этом месяце.
@@ -58,17 +106,25 @@ async def start_analysis(message: Message, state: FSMContext, db: Database):
 <b>Твой тариф:</b> {plan_name}
 <b>Лимит:</b> {max_analyses} анализов в месяц
 
-<b>Что можно сделать:</b>
-• Подождать до следующего месяца
-• Оформить подписку на более высокий тариф (/subscribe)
+<b>💎 Доступные тарифы:</b>
+• 🥉 Basic - 299₽/мес (15 анализов)
+• 🥈 Trader - 899₽/мес (50 анализов)  
+• 🥇 Pro - 1590₽/мес (150 анализов)
+• 💎 Elite - 2990₽/мес (500 анализов)
 
-Используй /subscribe для улучшения тарифа
+Выбери подходящий тариф:
 """
-        await message.answer(
-            limit_text,
-            reply_markup=get_main_keyboard(),
-            parse_mode="HTML"
-        )
+            from ..keyboards import InlineKeyboardMarkup, InlineKeyboardButton
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💎 Выбрать подписку", callback_data="show_subscriptions")],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_analysis")]
+            ])
+            
+            await message.answer(
+                limit_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
         return
     
     # Получаем оставшиеся анализы
@@ -223,7 +279,6 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
         # Возвращаем главное меню
         await state.clear()
         await message.answer(
-            "Что дальше?",
             reply_markup=get_main_keyboard()
         )
         
@@ -250,4 +305,53 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
                 "Попробуй позже или обратись в поддержку."
             )
         await state.clear()
+
+
+@router.callback_query(F.data.startswith("use_additional_analysis_"))
+async def use_additional_analysis(callback: CallbackQuery, state: FSMContext, db: Database):
+    """Использовать дополнительный анализ"""
+    await callback.answer()
+    
+    user_id = callback.from_user.id
+    
+    # Проверяем, есть ли дополнительные анализы
+    additional_analyses = await db.get_additional_analyses(user_id)
+    if additional_analyses <= 0:
+        await callback.message.edit_text(
+            "❌ У вас нет дополнительных анализов",
+            reply_markup=get_main_keyboard()
+        )
+        return
+    
+    # Используем дополнительный анализ
+    success = await db.use_additional_analysis(user_id)
+    if not success:
+        await callback.message.edit_text(
+            "❌ Ошибка использования дополнительного анализа",
+            reply_markup=get_main_keyboard()
+        )
+        return
+    
+    # Переходим к анализу
+    await state.set_state(AnalysisStates.waiting_for_symbol)
+    await callback.message.edit_text(
+        f"✅ <b>Дополнительный анализ использован!</b>\n\n"
+        f"Осталось дополнительных анализов: <b>{additional_analyses - 1}</b>\n\n"
+        f"Введи символ криптовалюты для анализа\n"
+        f"(например: BTC, ETH, SOL, BNB)\n\n"
+        f"Или нажми \"Отмена\" для выхода",
+        reply_markup=get_cancel_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data == "cancel_analysis")
+async def cancel_analysis_callback(callback: CallbackQuery, state: FSMContext):
+    """Отменить анализ через callback"""
+    await callback.answer()
+    await state.clear()
+    await callback.message.edit_text(
+        "❌ Анализ отменен",
+        reply_markup=get_main_keyboard()
+    )
 

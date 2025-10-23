@@ -67,12 +67,6 @@ def get_subscription_plans_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🆓 Free - 0₽",
-                    callback_data="subscribe_free"
-                )
-            ],
-            [
-                InlineKeyboardButton(
                     text="🥉 Basic - 299₽",
                     callback_data="subscribe_basic"
                 )

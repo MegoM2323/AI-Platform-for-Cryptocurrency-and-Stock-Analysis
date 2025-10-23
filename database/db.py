@@ -243,9 +243,30 @@ class Database:
                 try:
                     premium_until_dt = datetime.fromisoformat(premium_until.replace('Z', '+00:00'))
                     if premium_until_dt > datetime.now():
-                        # Определяем тип подписки по количеству анализов
-                        # Это упрощенная логика, можно расширить
-                        return 'premium'
+                        # Получаем последнюю подписку из базы данных
+                        async with aiosqlite.connect(self.db_path) as db_conn:
+                            db_conn.row_factory = aiosqlite.Row
+                            async with db_conn.execute(
+                                "SELECT subscription_type FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
+                                (user_id,)
+                            ) as cursor:
+                                row = await cursor.fetchone()
+                                if row:
+                                    return row['subscription_type']
+                                else:
+                                    # Если нет записи в subscriptions, определяем по дополнительным анализам
+                                    additional_analyses = user.get('additional_analyses', 0)
+                                    
+                                    if additional_analyses >= 500:
+                                        return 'elite'
+                                    elif additional_analyses >= 150:
+                                        return 'pro'
+                                    elif additional_analyses >= 50:
+                                        return 'trader'
+                                    elif additional_analyses >= 15:
+                                        return 'basic'
+                                    else:
+                                        return 'premium'  # Общий премиум статус
                     else:
                         # Премиум истек
                         await self.revoke_premium(user_id)

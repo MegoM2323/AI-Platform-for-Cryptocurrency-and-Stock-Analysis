@@ -53,12 +53,44 @@ class YooKassaClient:
         
         logger.info(f"YooKassa клиент инициализирован (тестовый режим: {test_mode})")
     
+    def _create_receipt(self, amount: float, description: str, user_email: str = None) -> Dict[str, Any]:
+        """
+        Создать чек для фискализации
+        
+        Args:
+            amount: Сумма платежа
+            description: Описание платежа
+            user_email: Email пользователя
+            
+        Returns:
+            Dict с данными чека
+        """
+        return {
+            "customer": {
+                "email": user_email or "noreply@example.com"
+            },
+            "items": [
+                {
+                    "description": description,
+                    "quantity": "1",
+                    "amount": {
+                        "value": f"{amount:.2f}",
+                        "currency": "RUB"
+                    },
+                    "vat_code": 1,  # НДС 20%
+                    "payment_subject": "service",  # Услуга
+                    "payment_mode": "full_payment"  # Полная предоплата
+                }
+            ]
+        }
+    
     async def create_payment(
         self,
         amount: float,
         description: str,
         return_url: str,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        receipt: Optional[Dict[str, Any]] = None
     ) -> PaymentData:
         """
         Создать платеж
@@ -91,9 +123,16 @@ class YooKassaClient:
                 "metadata": metadata or {}
             }
             
+            # Добавляем чек если передан
+            if receipt:
+                payment_data["receipt"] = receipt
+            
             # Добавляем тестовый режим если включен
             if self.test_mode:
                 payment_data["test"] = True
+            
+            # Логируем данные запроса для отладки
+            logger.info(f"Отправляем запрос к ЮКасса API: {payment_data}")
             
             headers = {
                 "Authorization": self.auth_header,
@@ -125,13 +164,27 @@ class YooKassaClient:
                     else:
                         error_text = await response.text()
                         logger.error(f"Ошибка создания платежа: {response.status} - {error_text}")
-                        raise Exception(f"Ошибка создания платежа: {response.status}")
+                        
+                        # Парсим детали ошибки для более информативного сообщения
+                        try:
+                            error_data = await response.json()
+                            error_description = error_data.get('description', 'Неизвестная ошибка')
+                            error_parameter = error_data.get('parameter', '')
+                            
+                            if 'receipt' in error_description.lower():
+                                raise Exception(f"Ошибка с чеком: {error_description}. Проверьте настройки фискализации в ЮКасса.")
+                            elif 'amount' in error_description.lower():
+                                raise Exception(f"Ошибка с суммой: {error_description}")
+                            else:
+                                raise Exception(f"Ошибка создания платежа: {error_description}")
+                        except:
+                            raise Exception(f"Ошибка создания платежа: {response.status} - {error_text}")
                         
         except Exception as e:
             logger.error(f"Ошибка при создании платежа: {e}")
             raise
     
-    async def get_payment(self, payment_id: str) -> PaymentData:
+    async def get_payment(self, payment_id: str) -> Optional[PaymentData]:
         """
         Получить информацию о платеже
         
@@ -139,13 +192,15 @@ class YooKassaClient:
             payment_id: ID платежа
             
         Returns:
-            PaymentData: Данные платежа
+            PaymentData или None при ошибке
         """
         try:
             headers = {
                 "Authorization": self.auth_header,
                 "Content-Type": "application/json"
             }
+            
+            logger.info(f"Запрос к YooKassa API для платежа: {payment_id}")
             
             async with aiohttp.ClientSession() as session:
                 async with session.get(
@@ -169,12 +224,27 @@ class YooKassaClient:
                         return payment
                     else:
                         error_text = await response.text()
-                        logger.error(f"Ошибка получения платежа: {response.status} - {error_text}")
-                        raise Exception(f"Ошибка получения платежа: {response.status}")
+                        logger.error(f"Ошибка получения платежа {payment_id}: {response.status} - {error_text}")
+                        
+                        # Парсим детали ошибки
+                        try:
+                            error_data = await response.json()
+                            error_description = error_data.get('description', 'Неизвестная ошибка')
+                            
+                            if response.status == 404:
+                                logger.warning(f"Платеж {payment_id} не найден")
+                            elif response.status == 401:
+                                logger.error(f"Ошибка авторизации при получении платежа {payment_id}")
+                            else:
+                                logger.error(f"Ошибка получения платежа {payment_id}: {error_description}")
+                        except:
+                            logger.error(f"Ошибка получения платежа {payment_id}: {response.status} - {error_text}")
+                        
+                        return None
                         
         except Exception as e:
-            logger.error(f"Ошибка при получении платежа: {e}")
-            raise
+            logger.error(f"Ошибка при получении платежа {payment_id}: {e}")
+            return None
     
     async def capture_payment(self, payment_id: str) -> bool:
         """
@@ -259,7 +329,8 @@ class PaymentManager:
         user_id: int,
         subscription_type: str,
         amount: float,
-        description: str
+        description: str,
+        user_email: str = None
     ) -> Optional[PaymentData]:
         """
         Создать платеж для подписки
@@ -288,11 +359,15 @@ class PaymentManager:
                 "payment_type": "subscription"
             }
             
+            # Создаем чек для фискализации
+            receipt = self.yookassa._create_receipt(amount, description, user_email)
+            
             payment = await self.yookassa.create_payment(
                 amount=amount,
                 description=description,
                 return_url=return_url,
-                metadata=metadata
+                metadata=metadata,
+                receipt=receipt
             )
             
             logger.info(f"Создан платеж вычисления подписки: {payment.id}")
@@ -300,6 +375,19 @@ class PaymentManager:
             
         except Exception as e:
             logger.error(f"Ошибка создания платежа подписки: {e}")
+            
+            # Дополнительная диагностика ошибки
+            if "receipt" in str(e).lower():
+                logger.error("Ошибка с чеком - проверьте настройки фискализации в ЮКасса")
+            elif "amount" in str(e).lower():
+                logger.error("Ошибка с суммой платежа")
+            elif "401" in str(e):
+                logger.error("Ошибка авторизации - проверьте YOOKASSA_SECRET_KEY")
+            elif "timeout" in str(e).lower():
+                logger.error("Таймаут при обращении к API ЮКасса")
+            else:
+                logger.error(f"Неизвестная ошибка при создании платежа: {e}")
+            
             return None
     
     async def create_analyses_payment(
@@ -307,7 +395,8 @@ class PaymentManager:
         user_id: int,
         analyses_count: int,
         amount: float,
-        description: str
+        description: str,
+        user_email: str = None
     ) -> Optional[PaymentData]:
         """
         Создать платеж для покупки анализов
@@ -336,11 +425,15 @@ class PaymentManager:
                 "payment_type": "analyses"
             }
             
+            # Создаем чек для фискализации
+            receipt = self.yookassa._create_receipt(amount, description, user_email)
+            
             payment = await self.yookassa.create_payment(
                 amount=amount,
                 description=description,
                 return_url=return_url,
-                metadata=metadata
+                metadata=metadata,
+                receipt=receipt
             )
             
             logger.info(f"Создан платеж для анализов: {payment.id}")
@@ -348,6 +441,19 @@ class PaymentManager:
             
         except Exception as e:
             logger.error(f"Ошибка создания платежа анализов: {e}")
+            
+            # Дополнительная диагностика ошибки
+            if "receipt" in str(e).lower():
+                logger.error("Ошибка с чеком - проверьте настройки фискализации в ЮКасса")
+            elif "amount" in str(e).lower():
+                logger.error("Ошибка с суммой платежа")
+            elif "401" in str(e):
+                logger.error("Ошибка авторизации - проверьте YOOKASSA_SECRET_KEY")
+            elif "timeout" in str(e).lower():
+                logger.error("Таймаут при обращении к API ЮКасса")
+            else:
+                logger.error(f"Неизвестная ошибка при создании платежа: {e}")
+            
             return None
     
     async def check_payment_status(self, payment_id: str) -> Optional[PaymentData]:
@@ -361,15 +467,33 @@ class PaymentManager:
             PaymentData или None при ошибке
         """
         if not self.yookassa:
-            logger.error("ЮКасса не инициализирована")
+            logger.error("ЮКасса не инициализирована - проверьте настройки YOOKASSA_SHOP_ID и YOOKASSA_SECRET_KEY")
             return None
         
         try:
+            logger.info(f"Проверка статуса платежа: {payment_id}")
             payment = await self.yookassa.get_payment(payment_id)
+            
+            if payment:
+                logger.info(f"Статус платежа {payment_id}: {payment.status.value}")
+            else:
+                logger.warning(f"Не удалось получить данные платежа {payment_id}")
+            
             return payment
             
         except Exception as e:
-            logger.error(f"Ошибка проверки статуса платежа: {e}")
+            logger.error(f"Ошибка проверки статуса платежа {payment_id}: {e}")
+            
+            # Дополнительная диагностика ошибки
+            if "401" in str(e):
+                logger.error("Ошибка авторизации - проверьте YOOKASSA_SECRET_KEY")
+            elif "404" in str(e):
+                logger.warning(f"Платеж {payment_id} не найден")
+            elif "timeout" in str(e).lower():
+                logger.error("Таймаут при обращении к API ЮКасса")
+            else:
+                logger.error(f"Неизвестная ошибка при проверке платежа: {e}")
+            
             return None
     
     def is_payment_successful(self, payment: PaymentData) -> bool:
@@ -383,6 +507,27 @@ class PaymentManager:
             bool: True если платеж успешен
         """
         return payment.status == PaymentStatus.SUCCEEDED
+    
+    def get_yookassa_status(self) -> Dict[str, Any]:
+        """
+        Получить статус инициализации YooKassa
+        
+        Returns:
+            Dict с информацией о статусе
+        """
+        shop_id = getattr(config, 'YOOKASSA_SHOP_ID', None)
+        secret_key = getattr(config, 'YOOKASSA_SECRET_KEY', None)
+        
+        return {
+            "initialized": self.yookassa is not None,
+            "shop_id_configured": bool(shop_id),
+            "secret_key_configured": bool(secret_key),
+            "test_mode": getattr(config, 'YOOKASSA_TEST_MODE', True),
+            "shop_id_length": len(shop_id) if shop_id else 0,
+            "secret_key_length": len(secret_key) if secret_key else 0,
+            "shop_id_preview": f"{shop_id[:4]}..." if shop_id and len(shop_id) > 4 else shop_id,
+            "secret_key_preview": f"{secret_key[:8]}..." if secret_key and len(secret_key) > 8 else secret_key
+        }
     
     # NOWPayments методы
     async def get_available_crypto_currencies(self) -> List[CryptocurrencyInfo]:

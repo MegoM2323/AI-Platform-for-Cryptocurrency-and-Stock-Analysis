@@ -232,6 +232,10 @@ class NOWPaymentsClient:
             if metadata:
                 payment_data["metadata"] = metadata
             
+            # Логируем данные запроса для отладки
+            logger.info(f"Отправляем запрос к NOWPayments API: {payment_data}")
+            logger.info(f"Заголовки: {self._get_headers()}")
+            
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     f"{self.base_url}/payment",
