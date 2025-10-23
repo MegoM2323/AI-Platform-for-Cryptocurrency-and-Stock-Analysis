@@ -78,7 +78,7 @@ class Config:
         'pro': {
             'name': 'Pro',
             'days': 30,
-            'price': 1590,
+            'price': 1,
             'analyses_per_month': 150,
             'features': ['150 анализов в месяц', 'Полный анализ', 'Приоритетная скорость']
         },

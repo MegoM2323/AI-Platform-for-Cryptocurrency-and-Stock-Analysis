@@ -314,57 +314,18 @@ async def process_successful_payment(payment_id: str, payment_type: str, user_id
             user_data = await db.get_user(user_id)
             is_premium = user_data.get('is_premium', 0)
             premium_until = user_data.get('premium_until')
-            current_additional_analyses = user_data.get('additional_analyses', 0)
             
-            # Определяем, это повторная покупка или первая
-            is_renewal = False
-            
-            # Если подписка уже активна, продлеваем её
-            if is_premium and premium_until:
-                try:
-                    from datetime import datetime
-                    premium_until_dt = datetime.fromisoformat(premium_until.replace('Z', '+00:00'))
-                    if premium_until_dt > datetime.now():
-                        # Подписка активна - ЭТО ПОВТОРНАЯ ПОКУПКА!
-                        is_renewal = True
-                        from datetime import timedelta
-                        new_premium_until = premium_until_dt + timedelta(days=days)
-                        async with aiosqlite.connect(db.db_path) as db_conn:
-                            await db_conn.execute(
-                                """UPDATE users 
-                                   SET premium_until = ?
-                                   WHERE user_id = ?""",
-                                (new_premium_until.isoformat(), user_id)
-                            )
-                            await db_conn.commit()
-                        logger.info(f"📅 Подписка продлена для пользователя {user_id} до {new_premium_until}")
-                    else:
-                        # Подписка истекла, активируем новую
-                        await db.grant_premium(user_id, days=days)
-                        logger.info(f"✨ Активирована новая подписка для пользователя {user_id}")
-                except Exception as e:
-                    # Ошибка парсинга даты, активируем новую подписку
-                    logger.error(f"Ошибка парсинга даты premium_until: {e}")
-                    await db.grant_premium(user_id, days=days)
-            else:
-                # Нет активной подписки, активируем новую
-                await db.grant_premium(user_id, days=days)
-                logger.info(f"✨ Активирована первая подписка для пользователя {user_id}")
+            # Активируем/перезаписываем подписку (это просто перезапишет дату истечения)
+            await db.grant_premium(user_id, days=days)
+            logger.info(f"✨ Подписка {subscription_type} активирована для пользователя {user_id}")
             
             # ✅ КРИТИЧЕСКИ ВАЖНО: СНАЧАЛА помечаем платеж как обработанный В БАЗЕ ДАННЫХ
-            # Это должно быть ДО начисления анализов для предотвращения дублирования!
+            # Это должно быть ДО создания подписки для предотвращения дублирования!
             
-            # ✅ НАКОПЛЕНИЕ АНАЛИЗОВ: при повторной покупке добавляем дополнительные анализы
+            # При каждой покупке подписки начисляем 0 дополнительных анализов
+            # Подписка дает только месячный лимит согласно тарифу
+            analyses_added = 0
             analyses_per_month = plan['analyses_per_month']
-            
-            if is_renewal:
-                # Это повторная покупка - добавляем анализы в запас (additional_analyses)
-                analyses_added = analyses_per_month
-                logger.info(f"🔄 Повторная покупка подписки - добавляем {analyses_added} анализов в резерв")
-            else:
-                # Это первая покупка - анализы начисляются только через месячный лимит
-                analyses_added = 0
-                logger.info(f"✨ Первая покупка подписки - анализы начисляются через месячный лимит")
             
             payment_marked = await db.mark_payment_processed(
                 payment_id=payment_id,
@@ -394,11 +355,6 @@ async def process_successful_payment(payment_id: str, payment_type: str, user_id
             # Получаем месячный лимит анализов для тарифа
             monthly_limit = plan['analyses_per_month']
             
-            # Если это повторная покупка, добавляем анализы в резерв
-            if is_renewal and analyses_added > 0:
-                await db.add_analyses(user_id, analyses_added)
-                logger.info(f"💎 Добавлено {analyses_added} анализов в резерв для пользователя {user_id}")
-            
             logger.info(f"✅ Подписка {subscription_type} активирована для пользователя {user_id}")
             logger.info(f"📊 Доступно {monthly_limit} анализов в месяц согласно тарифу {subscription_type}")
             
@@ -407,7 +363,7 @@ async def process_successful_payment(payment_id: str, payment_type: str, user_id
             processed_payments[payment_id] = result
             
             # Логируем информацию о повторной покупке
-            if is_renewal:
+            if is_premium and premium_until:
                 logger.info(f"🎯 Информация о подписке:")
                 logger.info(f"   📅 Период: {days} дней")
                 logger.info(f"   📊 Месячный лимит: {monthly_limit} анализов")
