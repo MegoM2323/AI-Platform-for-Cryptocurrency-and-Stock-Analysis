@@ -43,12 +43,27 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 )
 """
 
+# Таблица обработанных платежей (для защиты от дублирования)
+CREATE_PROCESSED_PAYMENTS_TABLE = """
+CREATE TABLE IF NOT EXISTS processed_payments (
+    payment_id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    payment_type TEXT NOT NULL,
+    subscription_type TEXT,
+    analyses_added INTEGER NOT NULL,
+    plan_name TEXT NOT NULL,
+    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users (user_id)
+)
+"""
+
 
 # Индексы для оптимизации
 CREATE_INDICES = [
     "CREATE INDEX IF NOT EXISTS idx_users_premium ON users(is_premium, premium_until)",
     "CREATE INDEX IF NOT EXISTS idx_analyses_user ON analyses(user_id, created_at)",
-    "CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id, status)"
+    "CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_processed_payments_user ON processed_payments(user_id, processed_at)"
 ]
 
 # Список всех схем для инициализации
@@ -56,5 +71,6 @@ ALL_SCHEMAS = [
     CREATE_USERS_TABLE,
     CREATE_ANALYSES_TABLE,
     CREATE_SUBSCRIPTIONS_TABLE,
+    CREATE_PROCESSED_PAYMENTS_TABLE,
 ] + CREATE_INDICES
 

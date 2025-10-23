@@ -210,6 +210,8 @@ class YooKassaClient:
                     if response.status == 200:
                         result = await response.json()
                         
+                        logger.info(f"Ответ YooKassa API для платежа {payment_id}: {result}")
+                        
                         payment = PaymentData(
                             id=result["id"],
                             status=PaymentStatus(result["status"]),
@@ -232,18 +234,22 @@ class YooKassaClient:
                             error_description = error_data.get('description', 'Неизвестная ошибка')
                             
                             if response.status == 404:
-                                logger.warning(f"Платеж {payment_id} не найден")
+                                logger.warning(f"Платеж {payment_id} не найден в YooKassa")
                             elif response.status == 401:
-                                logger.error(f"Ошибка авторизации при получении платежа {payment_id}")
+                                logger.error(f"Ошибка авторизации при получении платежа {payment_id} - проверьте YOOKASSA_SECRET_KEY")
                             else:
                                 logger.error(f"Ошибка получения платежа {payment_id}: {error_description}")
-                        except:
+                        except Exception as parse_error:
+                            logger.error(f"Не удалось распарсить ошибку для платежа {payment_id}: {parse_error}")
                             logger.error(f"Ошибка получения платежа {payment_id}: {response.status} - {error_text}")
                         
                         return None
                         
+        except aiohttp.ClientError as e:
+            logger.error(f"Ошибка сети при получении платежа {payment_id}: {e}", exc_info=True)
+            return None
         except Exception as e:
-            logger.error(f"Ошибка при получении платежа {payment_id}: {e}")
+            logger.error(f"Неожиданная ошибка при получении платежа {payment_id}: {e}", exc_info=True)
             return None
     
     async def capture_payment(self, payment_id: str) -> bool:

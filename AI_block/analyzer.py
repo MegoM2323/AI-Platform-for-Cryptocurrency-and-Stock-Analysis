@@ -38,9 +38,15 @@ class AIAnalyzer:
         Returns:
             Текст анализа или None в случае ошибки
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         try:
+            logger.info(f"Начинаем AI анализ для {symbol}")
+            
             # Создаем промпт
             user_prompt = create_analysis_prompt(market_data, symbol)
+            logger.debug(f"Промпт создан, длина: {len(user_prompt)} символов")
             
             # Выполняем запрос в отдельном потоке (API синхронное)
             loop = asyncio.get_event_loop()
@@ -52,10 +58,17 @@ class AIAnalyzer:
                 )
             )
             
-            return response
+            if response and response.strip():
+                logger.info(f"AI анализ успешно завершен для {symbol}, длина ответа: {len(response)} символов")
+                return response.strip()
+            else:
+                logger.warning(f"AI анализ вернул пустой ответ для {symbol}. Response: '{response}'")
+                return None
             
         except Exception as e:
-            print(f"Ошибка при анализе {symbol}: {e}")
+            logger.error(f"Ошибка при AI анализе {symbol}: {e}")
+            import traceback
+            logger.error(f"Полная ошибка: {traceback.format_exc()}")
             return None
     
     def _make_api_call(self, user_prompt: str) -> str:
@@ -68,23 +81,41 @@ class AIAnalyzer:
         Returns:
             Ответ от AI
         """
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": SYSTEM_PROMPT
-                },
-                {
-                    "role": "user",
-                    "content": user_prompt
-                }
-            ],
-            temperature=0.7,
-            max_tokens=2000
-        )
+        import logging
+        logger = logging.getLogger(__name__)
         
-        return response.choices[0].message.content
+        try:
+            logger.debug(f"Отправляем запрос к AI API, модель: {self.model}")
+            
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": SYSTEM_PROMPT
+                    },
+                    {
+                        "role": "user",
+                        "content": user_prompt
+                    }
+                ],
+                temperature=0.7,
+                max_tokens=2000
+            )
+            
+            if response and response.choices and len(response.choices) > 0:
+                content = response.choices[0].message.content
+                logger.debug(f"AI API вернул ответ длиной {len(content) if content else 0} символов")
+                if content:
+                    logger.debug(f"Первые 100 символов ответа: {content[:100]}")
+                return content or ""
+            else:
+                logger.error("AI API вернул пустой ответ")
+                return ""
+                
+        except Exception as e:
+            logger.error(f"Ошибка при вызове AI API: {e}")
+            raise
     
     async def quick_analysis(self, market_data: str, symbol: str) -> Optional[str]:
         """
@@ -97,7 +128,12 @@ class AIAnalyzer:
         Returns:
             Краткий анализ
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         try:
+            logger.info(f"Начинаем быстрый анализ для {symbol}")
+            
             user_prompt = f"{create_analysis_prompt(market_data, symbol)}\n\nПредоставь КРАТКИЙ анализ (3-5 предложений)."
             
             loop = asyncio.get_event_loop()
@@ -106,10 +142,17 @@ class AIAnalyzer:
                 partial(self._make_api_call, user_prompt)
             )
             
-            return response
+            if response and response.strip():
+                logger.info(f"Быстрый анализ успешно завершен для {symbol}")
+                return response
+            else:
+                logger.warning(f"Быстрый анализ вернул пустой ответ для {symbol}")
+                return None
             
         except Exception as e:
-            print(f"Ошибка при быстром анализе {symbol}: {e}")
+            logger.error(f"Ошибка при быстром анализе {symbol}: {e}")
+            import traceback
+            logger.error(f"Полная ошибка: {traceback.format_exc()}")
             return None
     
     async def analyze_with_custom_prompt(self, market_data: str, 
@@ -124,7 +167,12 @@ class AIAnalyzer:
         Returns:
             Результат анализа
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         try:
+            logger.info("Начинаем кастомный анализ")
+            
             full_prompt = f"{market_data}\n\n{custom_prompt}"
             
             loop = asyncio.get_event_loop()
@@ -133,9 +181,16 @@ class AIAnalyzer:
                 partial(self._make_api_call, full_prompt)
             )
             
-            return response
+            if response and response.strip():
+                logger.info("Кастомный анализ успешно завершен")
+                return response
+            else:
+                logger.warning("Кастомный анализ вернул пустой ответ")
+                return None
             
         except Exception as e:
-            print(f"Ошибка при кастомном анализе: {e}")
+            logger.error(f"Ошибка при кастомном анализе: {e}")
+            import traceback
+            logger.error(f"Полная ошибка: {traceback.format_exc()}")
             return None
 

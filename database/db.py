@@ -79,9 +79,59 @@ class Database:
         return remaining > 0
     
     async def increment_analysis_count(self, user_id: int):
-        """Увеличить счетчик анализов (теперь не нужен, так как считаем по месяцам)"""
-        # Метод оставлен для совместимости, но логика теперь в get_remaining_analyses
-        pass
+        """
+        Увеличить счетчик анализов и списать из дополнительных, если месячный лимит исчерпан
+        """
+        user = await self.get_user(user_id)
+        if not user:
+            return
+        
+        # Получаем количество анализов за текущий месяц
+        from datetime import date
+        current_month = date.today().replace(day=1)
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT COUNT(*) as count FROM analyses 
+                   WHERE user_id = ? AND DATE(created_at) >= ?""",
+                (user_id, current_month.isoformat())
+            ) as cursor:
+                row = await cursor.fetchone()
+                monthly_count = row['count'] if row else 0
+        
+        # Определяем лимит пользователя
+        is_premium = user.get('is_premium', 0)
+        
+        # Получаем план подписки для определения лимита
+        subscription_plan = await self.get_user_subscription_plan(user_id)
+        from config import config
+        
+        if subscription_plan == 'free':
+            limit = config.FREE_ANALYSES_PER_MONTH
+        elif subscription_plan == 'basic':
+            limit = config.BASIC_ANALYSES_PER_MONTH
+        elif subscription_plan == 'trader':
+            limit = config.TRADER_ANALYSES_PER_MONTH
+        elif subscription_plan == 'pro':
+            limit = config.PRO_ANALYSES_PER_MONTH
+        elif subscription_plan == 'elite':
+            limit = config.ELITE_ANALYSES_PER_MONTH
+        else:
+            limit = config.FREE_ANALYSES_PER_MONTH
+        
+        # Если превысили месячный лимит, списываем из дополнительных анализов
+        if monthly_count >= limit:
+            additional = user.get('additional_analyses', 0)
+            if additional > 0:
+                async with aiosqlite.connect(self.db_path) as db:
+                    await db.execute(
+                        """UPDATE users 
+                           SET additional_analyses = additional_analyses - 1
+                           WHERE user_id = ?""",
+                        (user_id,)
+                    )
+                    await db.commit()
     
     async def reset_daily_analyses(self, user_id: int):
         """Сбросить счетчик анализов на сегодня"""
@@ -156,7 +206,10 @@ class Database:
     
     
     async def get_remaining_analyses(self, user_id: int, max_free: int, max_premium: int) -> int:
-        """Получить количество оставшихся анализов в месяце"""
+        """
+        Получить количество оставшихся анализов
+        Возвращает общее количество доступных анализов, включая дополнительные
+        """
         user = await self.get_user(user_id)
         if not user:
             return 0
@@ -177,7 +230,15 @@ class Database:
         
         is_premium = user.get('is_premium', 0)
         limit = max_premium if is_premium else max_free
-        return max(0, limit - monthly_count)
+        
+        # Получаем дополнительные анализы
+        additional_analyses = user.get('additional_analyses', 0)
+        
+        # Общее количество доступных анализов = месячный лимит - использованные + дополнительные
+        monthly_remaining = max(0, limit - monthly_count)
+        total_remaining = monthly_remaining + additional_analyses
+        
+        return total_remaining
     
     async def add_analyses(self, user_id: int, count: int):
         """Добавить дополнительные анализы пользователю"""
@@ -275,4 +336,81 @@ class Database:
                     return 'free'
         
         return 'free'
+    
+    async def is_payment_processed(self, payment_id: str) -> bool:
+        """
+        Проверить, был ли платеж уже обработан
+        
+        Args:
+            payment_id: ID платежа
+            
+        Returns:
+            bool: True если платеж уже обработан
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT payment_id FROM processed_payments WHERE payment_id = ?",
+                (payment_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return row is not None
+    
+    async def mark_payment_processed(
+        self, 
+        payment_id: str, 
+        user_id: int, 
+        payment_type: str,
+        subscription_type: str,
+        analyses_added: int,
+        plan_name: str
+    ) -> bool:
+        """
+        Пометить платеж как обработанный
+        
+        Args:
+            payment_id: ID платежа
+            user_id: ID пользователя
+            payment_type: Тип платежа
+            subscription_type: Тип подписки
+            analyses_added: Количество начисленных анализов
+            plan_name: Название плана
+            
+        Returns:
+            bool: True если успешно
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    """INSERT INTO processed_payments 
+                       (payment_id, user_id, payment_type, subscription_type, analyses_added, plan_name)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (payment_id, user_id, payment_type, subscription_type, analyses_added, plan_name)
+                )
+                await db.commit()
+                return True
+        except Exception as e:
+            # Если платеж уже обработан (PRIMARY KEY constraint), это нормально
+            if "UNIQUE constraint failed" in str(e) or "PRIMARY KEY constraint failed" in str(e):
+                return False
+            raise
+    
+    async def get_processed_payment(self, payment_id: str) -> Optional[Dict]:
+        """
+        Получить информацию об обработанном платеже
+        
+        Args:
+            payment_id: ID платежа
+            
+        Returns:
+            Dict с информацией о платеже или None
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM processed_payments WHERE payment_id = ?",
+                (payment_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return dict(row) if row else None
 

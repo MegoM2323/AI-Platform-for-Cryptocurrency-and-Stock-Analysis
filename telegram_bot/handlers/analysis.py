@@ -4,7 +4,7 @@
 
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 
 from ..states import AnalysisStates
@@ -91,10 +91,16 @@ async def start_analysis(message: Message, state: FSMContext, db: Database):
                 [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_analysis")]
             ])
             
+            # Убираем reply-клавиатуру перед показом inline-кнопок
             await message.answer(
                 limit_text,
-                reply_markup=keyboard,
+                reply_markup=ReplyKeyboardRemove(),
                 parse_mode="HTML"
+            )
+            # Теперь отправляем сообщение с inline-кнопками
+            await message.answer(
+                "Выберите действие:",
+                reply_markup=keyboard
             )
         else:
             # Нет дополнительных анализов, предлагаем подписку
@@ -120,10 +126,16 @@ async def start_analysis(message: Message, state: FSMContext, db: Database):
                 [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_analysis")]
             ])
             
+            # Убираем reply-клавиатуру перед показом inline-кнопок
             await message.answer(
                 limit_text,
-                reply_markup=keyboard,
+                reply_markup=ReplyKeyboardRemove(),
                 parse_mode="HTML"
+            )
+            # Теперь отправляем сообщение с inline-кнопками
+            await message.answer(
+                "Выберите действие:",
+                reply_markup=keyboard
             )
         return
     
@@ -194,6 +206,7 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
         parse_mode="HTML"
     )
     
+    # Этап 1: Сбор данных
     try:
         logger.info(f"Начинаем сбор данных для {symbol}")
         
@@ -229,13 +242,30 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
         current_price = collector.get_current_price(symbol)
         logger.info(f"Текущая цена {symbol}: {current_price}")
         
-        # Форматируем данные
+    except Exception as e:
+        logger.error(f"Ошибка при сборе данных для {symbol}: {e}")
+        await processing_msg.edit_text(
+            "❌ Ошибка при получении данных.\n"
+            "Попробуй позже."
+        )
+        return
+    
+    # Этап 2: Форматирование данных
+    try:
         logger.info("Форматируем данные для анализа")
         formatter = DataFormatter()
         formatted_data = formatter.format_for_analysis(data, symbol, current_price)
         logger.info(f"Данные отформатированы: {len(formatted_data)} символов")
-        
-        # Выполняем AI анализ
+    except Exception as e:
+        logger.error(f"Ошибка при форматировании данных для {symbol}: {e}")
+        await processing_msg.edit_text(
+            "❌ Ошибка при обработке данных.\n"
+            "Попробуй позже."
+        )
+        return
+    
+    # Этап 3: AI анализ
+    try:
         logger.info("Запускаем AI анализ")
         analyzer = AIAnalyzer(
             api_key=config.OPENROUTER_API_KEY,
@@ -244,7 +274,14 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
         
         analysis_result = await analyzer.analyze_crypto(formatted_data, symbol)
         
-        if analysis_result is None:
+        logger.info(f"AI анализ вернул результат: {type(analysis_result)}")
+        if analysis_result:
+            logger.info(f"Длина результата: {len(analysis_result)} символов")
+            logger.info(f"Первые 100 символов: {analysis_result[:100]}")
+        else:
+            logger.warning("AI анализ вернул None или пустой результат")
+        
+        if analysis_result is None or not analysis_result.strip():
             logger.error(f"AI анализ не вернул результат для {symbol}")
             await processing_msg.edit_text(
                 "❌ Ошибка при выполнении анализа.\n"
@@ -253,57 +290,104 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
             return
         
         logger.info(f"AI анализ завершен: {len(analysis_result)} символов")
+    except Exception as e:
+        logger.error(f"Ошибка при AI анализе для {symbol}: {e}")
+        await processing_msg.edit_text(
+            "❌ Ошибка при выполнении анализа.\n"
+            "Попробуй позже."
+        )
+        return
+    
+    # Этап 4: Сохранение и отправка результата
+    try:
+        logger.info(f"Начинаем этап 4 для {symbol}")
+        logger.info(f"analysis_result тип: {type(analysis_result)}, длина: {len(analysis_result) if analysis_result else 'None'}")
         
         # Увеличиваем счетчик анализов
+        logger.info("Увеличиваем счетчик анализов")
         await db.increment_analysis_count(user_id)
         
         # Сохраняем анализ в БД
         logger.info("Сохраняем анализ в базу данных")
         await db.save_analysis(user_id, symbol, analysis_result)
+        logger.info("Анализ сохранен в БД")
         
-        # Отправляем результат
-        await processing_msg.edit_text(
-            f"✅ Анализ завершен для {symbol}"
-        )
+        # Удаляем сообщение о процессе анализа
+        try:
+            await processing_msg.delete()
+            logger.info("Сообщение о процессе анализа удалено")
+        except Exception as delete_error:
+            logger.warning(f"Не удалось удалить сообщение о процессе: {delete_error}")
+        
+        # Очищаем HTML теги из результата анализа
+        import re
+        import html
+        
+        # Убираем HTML теги и экранируем специальные символы
+        clean_result = re.sub(r'<[^>]+>', '', analysis_result)
+        clean_result = html.escape(clean_result)
+        
+        logger.info(f"Очищенный результат: {len(clean_result)} символов")
         
         # Разбиваем длинное сообщение, если нужно
-        if len(analysis_result) > 4096:
+        logger.info(f"Проверяем длину результата: {len(clean_result)} символов")
+        if len(clean_result) > 4096:
             # Telegram ограничивает сообщения до 4096 символов
             logger.info(f"Разбиваем длинное сообщение на части")
-            chunks = [analysis_result[i:i+4096] for i in range(0, len(analysis_result), 4096)]
+            chunks = [clean_result[i:i+4096] for i in range(0, len(clean_result), 4096)]
+            logger.info(f"Создано {len(chunks)} частей")
             for i, chunk in enumerate(chunks):
-                await message.answer(f"📄 Часть {i+1}/{len(chunks)}\n\n{chunk}", parse_mode="HTML")
+                logger.info(f"Отправляем часть {i+1}/{len(chunks)}")
+                # Добавляем главное меню только к последней части
+                if i == len(chunks) - 1:
+                    await message.answer(f"📄 Часть {i+1}/{len(chunks)}\n\n{chunk}", reply_markup=get_main_keyboard())
+                else:
+                    await message.answer(f"📄 Часть {i+1}/{len(chunks)}\n\n{chunk}")
         else:
-            await message.answer(analysis_result, parse_mode="HTML")
+            logger.info("Отправляем результат целиком")
+            await message.answer(clean_result, reply_markup=get_main_keyboard())
+            logger.info("Результат отправлен")
         
-        # Возвращаем главное меню
+        # Очищаем состояние
+        logger.info("Очищаем состояние")
         await state.clear()
-        await message.answer(
-            reply_markup=get_main_keyboard()
-        )
         
         logger.info(f"Анализ {symbol} успешно завершен для пользователя {user_id}")
         
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
-        logger.error(f"Ошибка при анализе {symbol} для пользователя {user_id}: {e}")
+        logger.error(f"Ошибка при сохранении/отправке результата для {symbol}: {e}")
         logger.error(f"Полная ошибка: {error_details}")
         
-        # Отправляем детальную ошибку в debug режиме
-        if config.DEBUG_MODE:
-            await processing_msg.edit_text(
-                f"❌ Ошибка при анализе:\n"
-                f"<code>{str(e)}</code>\n\n"
-                f"Полная ошибка:\n"
-                f"<code>{error_details[:1000]}</code>",
-                parse_mode="HTML"
-            )
+        # Даже если произошла ошибка при сохранении, показываем результат
+        logger.info("Показываем результат несмотря на ошибку")
+        
+        # Удаляем сообщение о процессе анализа
+        try:
+            await processing_msg.delete()
+        except Exception:
+            pass
+        
+        # Очищаем HTML теги из результата анализа
+        import re
+        import html
+        
+        # Убираем HTML теги и экранируем специальные символы
+        clean_result = re.sub(r'<[^>]+>', '', analysis_result)
+        clean_result = html.escape(clean_result)
+        
+        if len(clean_result) > 4096:
+            chunks = [clean_result[i:i+4096] for i in range(0, len(clean_result), 4096)]
+            for i, chunk in enumerate(chunks):
+                # Добавляем главное меню только к последней части
+                if i == len(chunks) - 1:
+                    await message.answer(f"📄 Часть {i+1}/{len(chunks)}\n\n{chunk}", reply_markup=get_main_keyboard())
+                else:
+                    await message.answer(f"📄 Часть {i+1}/{len(chunks)}\n\n{chunk}")
         else:
-            await processing_msg.edit_text(
-                "❌ Произошла ошибка при анализе.\n"
-                "Попробуй позже или обратись в поддержку."
-            )
+            await message.answer(clean_result, reply_markup=get_main_keyboard())
+        
         await state.clear()
 
 
@@ -317,7 +401,13 @@ async def use_additional_analysis(callback: CallbackQuery, state: FSMContext, db
     # Проверяем, есть ли дополнительные анализы
     additional_analyses = await db.get_additional_analyses(user_id)
     if additional_analyses <= 0:
-        await callback.message.edit_text(
+        # Удаляем inline-сообщение
+        try:
+            await callback.message.delete()
+        except:
+            pass
+        # Отправляем новое сообщение с главным меню
+        await callback.message.answer(
             "❌ У вас нет дополнительных анализов",
             reply_markup=get_main_keyboard()
         )
@@ -326,7 +416,13 @@ async def use_additional_analysis(callback: CallbackQuery, state: FSMContext, db
     # Используем дополнительный анализ
     success = await db.use_additional_analysis(user_id)
     if not success:
-        await callback.message.edit_text(
+        # Удаляем inline-сообщение
+        try:
+            await callback.message.delete()
+        except:
+            pass
+        # Отправляем новое сообщение с главным меню
+        await callback.message.answer(
             "❌ Ошибка использования дополнительного анализа",
             reply_markup=get_main_keyboard()
         )
@@ -334,7 +430,13 @@ async def use_additional_analysis(callback: CallbackQuery, state: FSMContext, db
     
     # Переходим к анализу
     await state.set_state(AnalysisStates.waiting_for_symbol)
-    await callback.message.edit_text(
+    # Удаляем inline-сообщение
+    try:
+        await callback.message.delete()
+    except:
+        pass
+    # Отправляем новое сообщение с клавиатурой отмены
+    await callback.message.answer(
         f"✅ <b>Дополнительный анализ использован!</b>\n\n"
         f"Осталось дополнительных анализов: <b>{additional_analyses - 1}</b>\n\n"
         f"Введи символ криптовалюты для анализа\n"
@@ -350,7 +452,13 @@ async def cancel_analysis_callback(callback: CallbackQuery, state: FSMContext):
     """Отменить анализ через callback"""
     await callback.answer()
     await state.clear()
-    await callback.message.edit_text(
+    # Удаляем inline-сообщение
+    try:
+        await callback.message.delete()
+    except:
+        pass
+    # Отправляем новое сообщение с главным меню
+    await callback.message.answer(
         "❌ Анализ отменен",
         reply_markup=get_main_keyboard()
     )

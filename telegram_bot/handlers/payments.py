@@ -33,6 +33,9 @@ router = Router()
 # Словарь для хранения активных проверок платежей
 active_payment_checks = {}
 
+# Словарь для хранения обработанных платежей (защита от дублирования)
+processed_payments = {}
+
 async def start_payment_monitoring(payment_id: str, user_id: int, payment_type: str, db: Database, bot, timeout_minutes: int = 10):
     """Запустить мониторинг платежа с автоматической проверкой"""
     try:
@@ -63,6 +66,7 @@ async def monitor_payment_status(payment_id: str):
     """Мониторинг статуса платежа в фоновом режиме"""
     try:
         if payment_id not in active_payment_checks:
+            logger.warning(f"Платеж {payment_id} не найден в активных проверках")
             return
             
         check_info = active_payment_checks[payment_id]
@@ -73,7 +77,7 @@ async def monitor_payment_status(payment_id: str):
         start_time = check_info['start_time']
         timeout = check_info['timeout']
         
-        logger.info(f"Начало мониторинга платежа {payment_id}")
+        logger.info(f"Начало автоматического мониторинга платежа {payment_id} для пользователя {user_id}, тип: {payment_type}")
         
         # Проверяем каждые 30 секунд в течение 10 минут
         check_interval = 30  # секунд
@@ -84,41 +88,68 @@ async def monitor_payment_status(payment_id: str):
             
             # Проверяем, не истек ли таймаут
             if datetime.now() - start_time > timeout:
-                logger.info(f"Таймаут мониторинга платежа {payment_id}")
+                logger.info(f"Таймаут автоматического мониторинга платежа {payment_id} (прошло {timeout.total_seconds()/60} минут)")
                 await handle_payment_timeout(payment_id, user_id, bot)
                 break
             
             # Проверяем статус платежа
             try:
+                logger.info(f"Автоматическая проверка {attempt + 1}/{max_checks} для платежа {payment_id}")
+                
                 if payment_type == "yookassa":
                     payment = await payment_manager.check_payment_status(payment_id)
-                    if payment and payment_manager.is_payment_successful(payment):
-                        await handle_successful_payment(payment_id, user_id, payment, db, bot)
-                        break
+                    if payment:
+                        logger.info(f"Получен статус платежа {payment_id}: {payment.status.value}")
+                        if payment_manager.is_payment_successful(payment):
+                            logger.info(f"Платеж {payment_id} успешно оплачен, начинаем обработку")
+                            await handle_successful_payment(payment_id, user_id, payment, db, bot)
+                            break
+                    else:
+                        logger.warning(f"Не удалось получить статус платежа {payment_id} при попытке {attempt + 1}")
+                        
                 elif payment_type == "crypto":
                     payment = await payment_manager.check_crypto_payment_status(payment_id)
-                    if payment and payment_manager.is_crypto_payment_successful(payment):
-                        await handle_successful_crypto_payment(payment_id, user_id, payment, db, bot)
-                        break
+                    if payment:
+                        logger.info(f"Получен статус криптоплатежа {payment_id}: {payment.status.value}")
+                        if payment_manager.is_crypto_payment_successful(payment):
+                            logger.info(f"Криптоплатеж {payment_id} успешно оплачен, начинаем обработку")
+                            await handle_successful_crypto_payment(payment_id, user_id, payment, db, bot)
+                            break
+                    else:
+                        logger.warning(f"Не удалось получить статус криптоплатежа {payment_id} при попытке {attempt + 1}")
+                        
             except Exception as e:
-                logger.error(f"Ошибка проверки статуса платежа {payment_id}: {e}")
+                logger.error(f"Ошибка проверки статуса платежа {payment_id} при попытке {attempt + 1}: {e}", exc_info=True)
                 # Продолжаем мониторинг даже при ошибке
             
-            logger.info(f"Проверка {attempt + 1}/{max_checks} для платежа {payment_id} - статус не изменился")
+            if attempt < max_checks - 1:
+                logger.debug(f"Проверка {attempt + 1}/{max_checks} для платежа {payment_id} - платеж еще не оплачен, следующая проверка через {check_interval} секунд")
         
         # Удаляем из активных проверок
         if payment_id in active_payment_checks:
             del active_payment_checks[payment_id]
+            logger.info(f"Платеж {payment_id} удален из активного мониторинга")
             
     except Exception as e:
-        logger.error(f"Ошибка мониторинга платежа {payment_id}: {e}")
+        logger.error(f"Критическая ошибка мониторинга платежа {payment_id}: {e}", exc_info=True)
         if payment_id in active_payment_checks:
             del active_payment_checks[payment_id]
 
 
 async def handle_successful_payment(payment_id: str, user_id: int, payment, db: Database, bot):
-    """Обработать успешный платеж"""
+    """Обработать успешный платеж (автоматическая проверка)"""
     try:
+        logger.info(f"🤖 Автоматическая обработка успешного платежа {payment_id} для пользователя {user_id}")
+        
+        # ✅ Проверяем, не был ли платеж уже обработан (ручной проверкой или другим процессом)
+        already_processed = await db.is_payment_processed(payment_id)
+        if already_processed:
+            logger.info(f"⏭️ Платеж {payment_id} уже обработан (возможно, ручной проверкой), пропускаем автоматическую обработку")
+            # Удаляем из активных проверок
+            if payment_id in active_payment_checks:
+                del active_payment_checks[payment_id]
+            return
+        
         metadata = payment.metadata or {}
         payment_type = metadata.get("payment_type", "")
         
@@ -126,27 +157,42 @@ async def handle_successful_payment(payment_id: str, user_id: int, payment, db: 
             subscription_type = metadata.get("subscription_type", "basic")
             
             # Обрабатываем успешный платеж
-            success, plan_name, analyses_added = await process_successful_payment(
+            success, plan_name, monthly_limit = await process_successful_payment(
                 payment_id, payment_type, user_id, db, subscription_type
             )
             
             if success:
-                # Уведомляем пользователя
-                await notify_user_about_payment_success(user_id, payment_id, plan_name, analyses_added, bot, db)
+                # Уведомляем пользователя только если мы успешно обработали платеж
+                await notify_user_about_payment_success(user_id, payment_id, plan_name, monthly_limit, bot, db)
                 
                 # Удаляем из активных проверок
                 if payment_id in active_payment_checks:
                     del active_payment_checks[payment_id]
                 
-                logger.info(f"Платеж {payment_id} успешно обработан для пользователя {user_id}")
+                logger.info(f"✅ Платеж {payment_id} успешно обработан автоматически для пользователя {user_id}")
+            else:
+                logger.warning(f"⚠️ Платеж {payment_id} не был обработан автоматически (возможно, уже обработан)")
+        else:
+            logger.warning(f"⚠️ Неизвестный тип платежа {payment_type} для платежа {payment_id}")
         
     except Exception as e:
-        logger.error(f"Ошибка обработки успешного платежа {payment_id}: {e}")
+        logger.error(f"❌ Ошибка автоматической обработки успешного платежа {payment_id}: {e}", exc_info=True)
 
 
 async def handle_successful_crypto_payment(payment_id: str, user_id: int, payment, db: Database, bot):
-    """Обработать успешный криптоплатеж"""
+    """Обработать успешный криптоплатеж (автоматическая проверка)"""
     try:
+        logger.info(f"🤖 Автоматическая обработка успешного криптоплатежа {payment_id} для пользователя {user_id}")
+        
+        # ✅ Проверяем, не был ли платеж уже обработан (ручной проверкой или другим процессом)
+        already_processed = await db.is_payment_processed(payment_id)
+        if already_processed:
+            logger.info(f"⏭️ Криптоплатеж {payment_id} уже обработан (возможно, ручной проверкой), пропускаем автоматическую обработку")
+            # Удаляем из активных проверок
+            if payment_id in active_payment_checks:
+                del active_payment_checks[payment_id]
+            return
+        
         metadata = payment.metadata or {}
         payment_type = metadata.get("payment_type", "")
         
@@ -154,22 +200,26 @@ async def handle_successful_crypto_payment(payment_id: str, user_id: int, paymen
             subscription_type = metadata.get("subscription_type", "basic")
             
             # Обрабатываем успешный криптоплатеж
-            success, plan_name, analyses_added = await process_successful_payment(
+            success, plan_name, monthly_limit = await process_successful_payment(
                 payment_id, payment_type, user_id, db, subscription_type
             )
             
             if success:
-                # Уведомляем пользователя
-                await notify_user_about_payment_success(user_id, payment_id, plan_name, analyses_added, bot, db)
+                # Уведомляем пользователя только если мы успешно обработали платеж
+                await notify_user_about_payment_success(user_id, payment_id, plan_name, monthly_limit, bot, db)
                 
                 # Удаляем из активных проверок
                 if payment_id in active_payment_checks:
                     del active_payment_checks[payment_id]
                 
-                logger.info(f"Криптоплатеж {payment_id} успешно обработан для пользователя {user_id}")
+                logger.info(f"✅ Криптоплатеж {payment_id} успешно обработан автоматически для пользователя {user_id}")
+            else:
+                logger.warning(f"⚠️ Криптоплатеж {payment_id} не был обработан автоматически (возможно, уже обработан)")
+        else:
+            logger.warning(f"⚠️ Неизвестный тип криптоплатежа {payment_type} для платежа {payment_id}")
         
     except Exception as e:
-        logger.error(f"Ошибка обработки успешного криптоплатежа {payment_id}: {e}")
+        logger.error(f"❌ Ошибка автоматической обработки успешного криптоплатежа {payment_id}: {e}", exc_info=True)
 
 
 async def handle_payment_timeout(payment_id: str, user_id: int, bot):
@@ -221,6 +271,24 @@ async def handle_payment_timeout(payment_id: str, user_id: int, bot):
 async def process_successful_payment(payment_id: str, payment_type: str, user_id: int, db: Database, subscription_type: str = None):
     """Обработать успешный платеж и активировать подписку"""
     try:
+        # ✅ ПРОВЕРКА 1: Проверяем в базе данных, не был ли уже обработан этот платёж
+        is_processed = await db.is_payment_processed(payment_id)
+        if is_processed:
+            logger.warning(f"⚠️ Платёж {payment_id} уже был обработан ранее (найден в БД), пропускаем повторную обработку")
+            # Получаем информацию об уже обработанном платеже
+            processed_info = await db.get_processed_payment(payment_id)
+            if processed_info:
+                return (True, processed_info['plan_name'], processed_info['analyses_added'])
+            return (False, None, 0)
+        
+        # ✅ ПРОВЕРКА 2: Проверяем в памяти (на случай быстрых повторных вызовов)
+        if payment_id in processed_payments:
+            logger.warning(f"⚠️ Платёж {payment_id} уже обрабатывается в данный момент (найден в памяти), пропускаем")
+            return processed_payments[payment_id]
+        
+        # Блокируем платеж в памяти для предотвращения одновременной обработки
+        processed_payments[payment_id] = (False, None, 0)
+        
         if payment_type == "subscription":
             # Если тип подписки не передан, получаем из базы данных
             if not subscription_type:
@@ -239,6 +307,8 @@ async def process_successful_payment(payment_id: str, payment_type: str, user_id
             # Получаем план подписки
             plan = config.SUBSCRIPTION_PLANS.get(subscription_type, config.SUBSCRIPTION_PLANS['basic'])
             days = plan['days']
+            
+            logger.info(f"🔄 Начинаем обработку платежа {payment_id}: пользователь {user_id}, план {subscription_type}")
             
             # Проверяем, есть ли уже активная подписка
             user_data = await db.get_user(user_id)
@@ -263,57 +333,102 @@ async def process_successful_payment(payment_id: str, payment_type: str, user_id
                                 (new_premium_until.isoformat(), user_id)
                             )
                             await db_conn.commit()
-                        logger.info(f"Подписка продлена для пользователя {user_id} до {new_premium_until}")
+                        logger.info(f"📅 Подписка продлена для пользователя {user_id} до {new_premium_until}")
                     else:
                         # Подписка истекла, активируем новую
                         await db.grant_premium(user_id, days=days)
-                except:
+                        logger.info(f"✨ Активирована новая подписка для пользователя {user_id}")
+                except Exception as e:
                     # Ошибка парсинга даты, активируем новую подписку
+                    logger.error(f"Ошибка парсинга даты premium_until: {e}")
                     await db.grant_premium(user_id, days=days)
             else:
                 # Нет активной подписки, активируем новую
                 await db.grant_premium(user_id, days=days)
+                logger.info(f"✨ Активирована первая подписка для пользователя {user_id}")
             
-            # Начисляем анализы согласно плану подписки (накапливаем)
-            analyses_to_add = plan['analyses_per_month']
-            await db.add_analyses(user_id, analyses_to_add)
+            # ✅ КРИТИЧЕСКИ ВАЖНО: СНАЧАЛА помечаем платеж как обработанный В БАЗЕ ДАННЫХ
+            # Это должно быть ДО активации подписки для предотвращения дублирования!
             
-            # Получаем общее количество анализов после начисления
-            updated_user_data = await db.get_user(user_id)
-            total_analyses = updated_user_data.get('additional_analyses', 0)
+            # ✅ ИСПРАВЛЕНИЕ: Подписка НЕ начисляет additional_analyses
+            # Подписка только дает месячный лимит анализов согласно тарифу
+            # Дополнительные анализы начисляются только при покупке отдельных пакетов!
+            analyses_added = 0  # Для подписки не начисляем дополнительные анализы
             
-            logger.info(f"Начислено {analyses_to_add} анализов для подписки {subscription_type} пользователю {user_id}. Всего анализов: {total_analyses}")
+            payment_marked = await db.mark_payment_processed(
+                payment_id=payment_id,
+                user_id=user_id,
+                payment_type=payment_type,
+                subscription_type=subscription_type,
+                analyses_added=analyses_added,
+                plan_name=plan['name']
+            )
             
-            logger.info(f"Подписка {subscription_type} активирована для пользователя {user_id}, начислено {analyses_to_add} анализов")
-            return True, plan['name'], analyses_to_add
+            if not payment_marked:
+                # Платеж уже был обработан другим процессом (race condition)
+                logger.warning(f"⚠️ Платеж {payment_id} уже помечен как обработанный другим процессом, пропускаем активацию")
+                processed_info = await db.get_processed_payment(payment_id)
+                if processed_info:
+                    result = (True, processed_info['plan_name'], processed_info['analyses_added'])
+                    processed_payments[payment_id] = result
+                    return result
+                return (False, None, 0)
+            
+            logger.info(f"🔒 Платеж {payment_id} помечен как обработанный в базе данных (атомарная операция)")
+            
+            # Создаем запись о подписке
+            await db.create_subscription(user_id, subscription_type, plan['price'])
+            logger.info(f"📝 Создана запись о подписке {subscription_type} для пользователя {user_id}")
+            
+            # Получаем месячный лимит анализов для тарифа
+            monthly_limit = plan['analyses_per_month']
+            
+            logger.info(f"✅ Подписка {subscription_type} активирована для пользователя {user_id}")
+            logger.info(f"📊 Доступно {monthly_limit} анализов в месяц согласно тарифу {subscription_type}")
+            
+            # Сохраняем информацию об обработке платежа в памяти
+            result = (True, plan['name'], monthly_limit)  # Возвращаем месячный лимит для информирования
+            processed_payments[payment_id] = result
+            
+            return result
         
         return False, None, 0
         
     except Exception as e:
-        logger.error(f"Ошибка обработки успешного платежа: {e}")
+        logger.error(f"❌ Ошибка обработки успешного платежа {payment_id}: {e}", exc_info=True)
+        # Удаляем из памяти при ошибке, чтобы можно было повторить попытку
+        if payment_id in processed_payments:
+            del processed_payments[payment_id]
         return False, None, 0
 
 
-async def notify_user_about_payment_success(user_id: int, payment_id: str, plan_name: str, analyses_added: int, bot, db: Database = None):
+async def notify_user_about_payment_success(user_id: int, payment_id: str, plan_name: str, monthly_limit: int, bot, db: Database = None):
     """Уведомить пользователя об успешной оплате"""
     try:
-        # Получаем общее количество анализов
-        total_analyses = 0
+        logger.info(f"📧 Отправка уведомления пользователю {user_id} о платеже {payment_id}")
+        
+        # Получаем информацию о пользователе
         if db:
             user_data = await db.get_user(user_id)
-            total_analyses = user_data.get('additional_analyses', 0) if user_data else 0
+            additional_analyses = user_data.get('additional_analyses', 0) if user_data else 0
+        else:
+            additional_analyses = 0
         
         success_text = f"""
 ✅ <b>Платеж успешно обработан!</b>
 
-💎 <b>{plan_name} активирована</b>
+💎 <b>Подписка {plan_name} активирована!</b>
 
-На ваш счет начислено: <b>+{analyses_added} анализов</b>
-{f'Всего анализов на счету: <b>{total_analyses}</b>' if total_analyses > 0 else ''}
+📊 <b>Доступно анализов в месяц:</b> {monthly_limit}
+{f'💰 Дополнительные анализы на счету: <b>{additional_analyses}</b>' if additional_analyses > 0 else ''}
 
 <b>ID платежа:</b> <code>{payment_id}</code>
 
-💡 <b>Важно:</b> При повторной покупке подписки анализы накапливаются!
+💡 <b>Информация:</b>
+• Месячный лимит обновляется каждый месяц
+• Дополнительные анализы можно купить отдельно
+• Неиспользованные дополнительные анализы не сгорают
+
 Теперь вы можете использовать анализы для исследования криптовалют!
         """
         
@@ -324,8 +439,10 @@ async def notify_user_about_payment_success(user_id: int, payment_id: str, plan_
             parse_mode="HTML"
         )
         
+        logger.info(f"✅ Уведомление отправлено пользователю {user_id}")
+        
     except Exception as e:
-        logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
+        logger.error(f"❌ Ошибка отправки уведомления пользователю {user_id}: {e}", exc_info=True)
 
 
 # Webhook обработчики для автоматической обработки платежей
@@ -358,7 +475,7 @@ async def yookassa_webhook_handler(request):
                     db = Database(config.DATABASE_PATH)
                     
                     # Обрабатываем успешный платеж
-                    success, plan_name, analyses_added = await process_successful_payment(
+                    success, plan_name, monthly_limit = await process_successful_payment(
                         payment_id, payment_type, user_id, 
                         db,
                         subscription_type
@@ -367,7 +484,7 @@ async def yookassa_webhook_handler(request):
                     if success:
                         # Получаем экземпляр бота для уведомления
                         from telegram_bot.bot import bot
-                        await notify_user_about_payment_success(user_id, payment_id, plan_name, analyses_added, bot, db)
+                        await notify_user_about_payment_success(user_id, payment_id, plan_name, monthly_limit, bot, db)
                         logger.info(f"Платеж {payment_id} успешно обработан для пользователя {user_id}")
                     else:
                         logger.error(f"Не удалось обработать платеж {payment_id} для пользователя {user_id}")
@@ -414,7 +531,7 @@ async def nowpayments_webhook_handler(request):
                 db = Database(config.DATABASE_PATH)
                 
                 # Обрабатываем успешный криптоплатеж
-                success, plan_name, analyses_added = await process_successful_payment(
+                success, plan_name, monthly_limit = await process_successful_payment(
                     payment.payment_id, payment_type, user_id,
                     db,
                     subscription_type
@@ -423,7 +540,7 @@ async def nowpayments_webhook_handler(request):
                 if success:
                     # Получаем экземпляр бота для уведомления
                     from telegram_bot.bot import bot
-                    await notify_user_about_payment_success(user_id, payment.payment_id, plan_name, analyses_added, bot, db)
+                    await notify_user_about_payment_success(user_id, payment.payment_id, plan_name, monthly_limit, bot, db)
                     logger.info(f"Криптоплатеж {payment.payment_id} успешно обработан для пользователя {user_id}")
                 else:
                     logger.error(f"Не удалось обработать криптоплатеж {payment.payment_id} для пользователя {user_id}")
@@ -767,20 +884,11 @@ async def process_elite_subscription(callback: CallbackQuery, db: Database, stat
 @router.callback_query(F.data.startswith("check_payment_"))
 async def check_payment_status(callback: CallbackQuery, db: Database):
     """Проверить статус платежа (ручная проверка)"""
-    await callback.answer()
+    # Сразу отвечаем на callback для предотвращения повторных нажатий
+    await callback.answer("🔄 Проверяем статус платежа...", show_alert=False)
     
     # Извлекаем ID платежа из callback_data
     payment_id = callback.data.replace("check_payment_", "")
-    
-    # Проверяем, не идет ли уже автоматический мониторинг
-    if payment_id in active_payment_checks:
-        await callback.message.edit_text(
-            "🔄 <b>Автоматическая проверка уже активна</b>\n\n"
-            "Система автоматически проверит оплату в течение 10 минут.\n"
-            "Пожалуйста, подождите.",
-            parse_mode="HTML"
-        )
-        return
     
     # Проверяем инициализацию YooKassa
     if not payment_manager.yookassa:
@@ -793,6 +901,8 @@ async def check_payment_status(callback: CallbackQuery, db: Database):
         return
     
     try:
+        logger.info(f"Ручная проверка статуса платежа {payment_id} пользователем {callback.from_user.id}")
+        
         # Проверяем статус платежа
         payment = await payment_manager.check_payment_status(payment_id)
         
@@ -811,40 +921,115 @@ async def check_payment_status(callback: CallbackQuery, db: Database):
             )
             return
         
+        logger.info(f"Получен статус платежа {payment_id}: {payment.status.value}")
+        
         # Проверяем успешность платежа
         if payment_manager.is_payment_successful(payment):
+            # Удаляем из активных проверок, если есть
+            if payment_id in active_payment_checks:
+                del active_payment_checks[payment_id]
+            
             # Обрабатываем успешный платеж
             user_id = callback.from_user.id
             metadata = payment.metadata or {}
             payment_type = metadata.get("payment_type", "")
             
+            logger.info(f"Ручная проверка успешного платежа {payment_id} для пользователя {user_id}, тип: {payment_type}")
+            
+            # ✅ ПРОВЕРЯЕМ: был ли платеж уже обработан ранее
+            already_processed = await db.is_payment_processed(payment_id)
+            
+            if already_processed:
+                # Платеж уже обработан - просто показываем информацию
+                logger.info(f"✅ Платеж {payment_id} уже был обработан ранее, показываем информацию")
+                processed_info = await db.get_processed_payment(payment_id)
+                
+                if processed_info and payment_type == "subscription":
+                    subscription_type = processed_info['subscription_type']
+                    plan = config.SUBSCRIPTION_PLANS.get(subscription_type, config.SUBSCRIPTION_PLANS['basic'])
+                    
+                    # Получаем актуальное количество дополнительных анализов
+                    updated_user_data = await db.get_user(user_id)
+                    additional_analyses = updated_user_data.get('additional_analyses', 0)
+                    
+                    success_text = f"""
+✅ <b>Платеж уже был обработан ранее</b>
+
+💎 <b>Подписка {processed_info['plan_name']} активирована</b>
+
+📊 <b>Месячный лимит:</b> {plan['analyses_per_month']} анализов
+{f'💰 Дополнительные анализы: <b>{additional_analyses}</b>' if additional_analyses > 0 else ''}
+
+<b>ID платежа:</b> <code>{payment.id}</code>
+
+<i>Подписка уже активирована, повторная обработка не требуется.</i>
+                    """
+                else:
+                    success_text = f"""
+✅ <b>Платеж уже был обработан ранее</b>
+
+<b>ID платежа:</b> <code>{payment.id}</code>
+                    """
+                
+                # Удаляем inline-сообщение
+                try:
+                    await callback.message.delete()
+                except:
+                    pass
+                # Отправляем новое сообщение
+                await callback.message.answer(
+                    success_text,
+                    reply_markup=get_main_keyboard(),
+                    parse_mode="HTML"
+                )
+                return
+            
+            # Платеж еще не обработан - обрабатываем его
             if payment_type == "subscription":
                 # Получаем информацию о подписке из метаданных
                 subscription_type = metadata.get("subscription_type", "basic")
-                plan = config.SUBSCRIPTION_PLANS.get(subscription_type, config.SUBSCRIPTION_PLANS['basic'])
-                days = plan['days']
                 
-                # Активируем подписку
-                await db.grant_premium(user_id, days=days)
-                await db.create_subscription(user_id, subscription_type, plan['price'])
+                # Используем единую функцию обработки платежа
+                success, plan_name, monthly_limit = await process_successful_payment(
+                    payment_id, payment_type, user_id, db, subscription_type
+                )
                 
-                # Начисляем анализы согласно плану
-                analyses_to_add = plan['analyses_per_month']
-                await db.add_analyses(user_id, analyses_to_add)
-                
-                success_text = f"""
+                if success:
+                    # Получаем количество дополнительных анализов
+                    updated_user_data = await db.get_user(user_id)
+                    additional_analyses = updated_user_data.get('additional_analyses', 0)
+                    
+                    # Получаем информацию о плане для отображения
+                    plan = config.SUBSCRIPTION_PLANS.get(subscription_type, config.SUBSCRIPTION_PLANS['basic'])
+                    
+                    success_text = f"""
 ✅ <b>Платеж успешно обработан!</b>
 
-💎 <b>{plan['name']} активирована</b>
+💎 <b>Подписка {plan_name} активирована!</b>
 
-На ваш счет начислено: <b>{analyses_to_add} анализов</b>
+📊 <b>Месячный лимит:</b> {monthly_limit} анализов
+{f'💰 Дополнительные анализы: <b>{additional_analyses}</b>' if additional_analyses > 0 else ''}
 
-Теперь вам доступно:
-• {plan['analyses_per_month']} анализов в месяц
+<b>Что входит:</b>
 {chr(10).join([f"• {feature}" for feature in plan['features']])}
 
 <b>ID платежа:</b> <code>{payment.id}</code>
-                """
+
+💡 <b>Информация:</b>
+• Месячный лимит обновляется каждый месяц
+• Дополнительные анализы можно купить отдельно
+                    """
+                    
+                    logger.info(f"Платеж {payment_id} успешно обработан для пользователя {user_id}")
+                else:
+                    logger.error(f"Не удалось обработать платеж {payment_id} для пользователя {user_id}")
+                    success_text = f"""
+❌ <b>Ошибка обработки платежа</b>
+
+Не удалось активировать подписку. Пожалуйста, свяжитесь с поддержкой.
+
+<b>ID платежа:</b> <code>{payment.id}</code>
+                    """
             else:
                 success_text = f"""
 ✅ <b>Платеж успешно обработан!</b>
@@ -852,21 +1037,41 @@ async def check_payment_status(callback: CallbackQuery, db: Database):
 <b>ID платежа:</b> <code>{payment.id}</code>
                 """
             
-            await callback.message.edit_text(
+            # Удаляем inline-сообщение
+            try:
+                await callback.message.delete()
+            except:
+                pass
+            # Отправляем новое сообщение с главным меню
+            await callback.message.answer(
                 success_text,
                 reply_markup=get_main_keyboard(),
                 parse_mode="HTML"
             )
             
         else:
-            # Платеж еще не обработан
-            status_text = f"""
+            # Проверяем, не идет ли уже автоматический мониторинг
+            if payment_id in active_payment_checks:
+                status_text = f"""
+🔄 <b>Автоматическая проверка уже активна</b>
+
+<b>Статус платежа:</b> {payment.status.value}
+<b>ID платежа:</b> <code>{payment.id}</code>
+
+Система автоматически проверит оплату в течение 10 минут.
+Пожалуйста, подождите.
+                """
+            else:
+                # Платеж еще не обработан
+                status_text = f"""
 🔄 <b>Статус платежа: {payment.status.value}</b>
 
 <b>ID платежа:</b> <code>{payment.id}</code>
 
 Платеж еще обрабатывается. Попробуйте проверить статус через несколько минут.
-            """
+
+<i>Обычно обработка платежа занимает 1-3 минуты.</i>
+                """
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(
@@ -886,10 +1091,11 @@ async def check_payment_status(callback: CallbackQuery, db: Database):
             )
             
     except Exception as e:
-        logger.error(f"Ошибка проверки статуса платежа: {e}")
+        logger.error(f"Ошибка проверки статуса платежа {payment_id}: {e}", exc_info=True)
         await callback.message.edit_text(
             "❌ <b>Ошибка проверки платежа</b>\n\n"
-            "Попробуйте позже или свяжитесь с поддержкой.",
+            "Попробуйте позже или свяжитесь с поддержкой.\n\n"
+            f"<i>Детали ошибки: {str(e)[:100]}</i>",
             parse_mode="HTML"
         )
 
@@ -1163,62 +1369,82 @@ async def check_crypto_payment_status(callback: CallbackQuery, db: Database):
     # Извлекаем ID платежа из callback_data
     payment_id = callback.data.replace("check_crypto_payment_", "")
     
-    # Проверяем, не идет ли уже автоматический мониторинг
-    if payment_id in active_payment_checks:
-        await callback.message.edit_text(
-            "🔄 <b>Автоматическая проверка уже активна</b>\n\n"
-            "Система автоматически проверит оплату в течение 10 минут.\n"
-            "Пожалуйста, подождите.",
-            parse_mode="HTML"
-        )
-        return
-    
     try:
+        logger.info(f"Ручная проверка статуса криптоплатежа {payment_id} пользователем {callback.from_user.id}")
+        
         # Проверяем статус криптоплатежа
         payment = await payment_manager.check_crypto_payment_status(payment_id)
         
         if not payment:
+            logger.error(f"Не удалось получить данные криптоплатежа {payment_id}")
             await callback.message.edit_text(
                 "❌ <b>Ошибка проверки криптоплатежа</b>\n\n"
+                f"Криптоплатеж <code>{payment_id}</code> не найден или недоступен.\n\n"
                 "Попробуйте позже или свяжитесь с поддержкой.",
                 parse_mode="HTML"
             )
             return
         
+        logger.info(f"Получен статус криптоплатежа {payment_id}: {payment.status.value}")
+        
         # Проверяем успешность платежа
         if payment_manager.is_crypto_payment_successful(payment):
+            # Удаляем из активных проверок, если есть
+            if payment_id in active_payment_checks:
+                del active_payment_checks[payment_id]
+            
             # Обрабатываем успешный платеж
             user_id = callback.from_user.id
             metadata = payment.metadata or {}
             payment_type = metadata.get("payment_type", "")
             
+            logger.info(f"Обработка успешного криптоплатежа {payment_id} для пользователя {user_id}, тип: {payment_type}")
+            
             if payment_type == "subscription":
                 # Получаем информацию о подписке из метаданных
                 subscription_type = metadata.get("subscription_type", "basic")
-                plan = config.SUBSCRIPTION_PLANS.get(subscription_type, config.SUBSCRIPTION_PLANS['basic'])
-                days = plan['days']
                 
-                # Активируем подписку
-                await db.grant_premium(user_id, days=days)
-                await db.create_subscription(user_id, subscription_type, plan['price'])
+                # Используем единую функцию обработки платежа
+                success, plan_name, monthly_limit = await process_successful_payment(
+                    payment_id, payment_type, user_id, db, subscription_type
+                )
                 
-                # Начисляем анализы согласно плану
-                analyses_to_add = plan['analyses_per_month']
-                await db.add_analyses(user_id, analyses_to_add)
-                
-                success_text = f"""
+                if success:
+                    # Получаем количество дополнительных анализов
+                    updated_user_data = await db.get_user(user_id)
+                    additional_analyses = updated_user_data.get('additional_analyses', 0)
+                    
+                    # Получаем информацию о плане для отображения
+                    plan = config.SUBSCRIPTION_PLANS.get(subscription_type, config.SUBSCRIPTION_PLANS['basic'])
+                    
+                    success_text = f"""
 ✅ <b>Криптоплатеж успешно обработан!</b>
 
-💎 <b>{plan['name']} активирована</b>
+💎 <b>Подписка {plan_name} активирована!</b>
 
-На ваш счет начислено: <b>{analyses_to_add} анализов</b>
+📊 <b>Месячный лимит:</b> {monthly_limit} анализов
+{f'💰 Дополнительные анализы: <b>{additional_analyses}</b>' if additional_analyses > 0 else ''}
 
-Теперь вам доступно:
-• {plan['analyses_per_month']} анализов в месяц
+<b>Что входит:</b>
 {chr(10).join([f"• {feature}" for feature in plan['features']])}
 
 <b>ID платежа:</b> <code>{payment.payment_id}</code>
-                """
+
+💡 <b>Информация:</b>
+• Месячный лимит обновляется каждый месяц
+• Дополнительные анализы можно купить отдельно
+                    """
+                    
+                    logger.info(f"Криптоплатеж {payment_id} успешно обработан для пользователя {user_id}")
+                else:
+                    logger.error(f"Не удалось обработать криптоплатеж {payment_id} для пользователя {user_id}")
+                    success_text = f"""
+❌ <b>Ошибка обработки криптоплатежа</b>
+
+Не удалось активировать подписку. Пожалуйста, свяжитесь с поддержкой.
+
+<b>ID платежа:</b> <code>{payment.payment_id}</code>
+                    """
             else:
                 success_text = f"""
 ✅ <b>Криптоплатеж успешно обработан!</b>
@@ -1226,21 +1452,41 @@ async def check_crypto_payment_status(callback: CallbackQuery, db: Database):
 <b>ID платежа:</b> <code>{payment.payment_id}</code>
                 """
             
-            await callback.message.edit_text(
+            # Удаляем inline-сообщение
+            try:
+                await callback.message.delete()
+            except:
+                pass
+            # Отправляем новое сообщение с главным меню
+            await callback.message.answer(
                 success_text,
                 reply_markup=get_main_keyboard(),
                 parse_mode="HTML"
             )
             
         else:
-            # Платеж еще не обработан
-            status_text = f"""
+            # Проверяем, не идет ли уже автоматический мониторинг
+            if payment_id in active_payment_checks:
+                status_text = f"""
+🔄 <b>Автоматическая проверка уже активна</b>
+
+<b>Статус криптоплатежа:</b> {payment.status.value}
+<b>ID платежа:</b> <code>{payment.payment_id}</code>
+
+Система автоматически проверит оплату в течение 10 минут.
+Пожалуйста, подождите.
+                """
+            else:
+                # Платеж еще не обработан
+                status_text = f"""
 🔄 <b>Статус криптоплатежа: {payment.status.value}</b>
 
 <b>ID платежа:</b> <code>{payment.payment_id}</code>
 
 Криптоплатеж еще обрабатывается. Попробуйте проверить статус через несколько минут.
-            """
+
+<i>Обработка криптоплатежа может занять до 30 минут в зависимости от блокчейна.</i>
+                """
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(
@@ -1260,10 +1506,11 @@ async def check_crypto_payment_status(callback: CallbackQuery, db: Database):
             )
             
     except Exception as e:
-        logger.error(f"Ошибка проверки статуса криптоплатежа: {e}")
+        logger.error(f"Ошибка проверки статуса криптоплатежа {payment_id}: {e}", exc_info=True)
         await callback.message.edit_text(
             "❌ <b>Ошибка проверки криптоплатежа</b>\n\n"
-            "Попробуйте позже или свяжитесь с поддержкой.",
+            "Попробуйте позже или свяжитесь с поддержкой.\n\n"
+            f"<i>Детали ошибки: {str(e)[:100]}</i>",
             parse_mode="HTML"
         )
 
@@ -1327,6 +1574,8 @@ async def manual_check_payment(callback: CallbackQuery, db: Database):
         return
     
     try:
+        logger.info(f"Ручная проверка платежа {payment_id} после таймаута пользователем {callback.from_user.id}")
+        
         # Проверяем статус платежа
         payment = await payment_manager.check_payment_status(payment_id)
         
@@ -1345,6 +1594,8 @@ async def manual_check_payment(callback: CallbackQuery, db: Database):
             )
             return
         
+        logger.info(f"Получен статус платежа {payment_id}: {payment.status.value}")
+        
         # Проверяем успешность платежа
         if payment_manager.is_payment_successful(payment):
             # Обрабатываем успешный платеж
@@ -1352,32 +1603,52 @@ async def manual_check_payment(callback: CallbackQuery, db: Database):
             metadata = payment.metadata or {}
             payment_type = metadata.get("payment_type", "")
             
+            logger.info(f"Обработка успешного платежа {payment_id} для пользователя {user_id}, тип: {payment_type}")
+            
             if payment_type == "subscription":
                 subscription_type = metadata.get("subscription_type", "basic")
-                plan = config.SUBSCRIPTION_PLANS.get(subscription_type, config.SUBSCRIPTION_PLANS['basic'])
-                days = plan['days']
                 
-                # Активируем подписку
-                await db.grant_premium(user_id, days=days)
-                await db.create_subscription(user_id, subscription_type, plan['price'])
+                # Используем единую функцию обработки платежа
+                success, plan_name, monthly_limit = await process_successful_payment(
+                    payment_id, payment_type, user_id, db, subscription_type
+                )
                 
-                # Начисляем анализы согласно плану
-                analyses_to_add = plan['analyses_per_month']
-                await db.add_analyses(user_id, analyses_to_add)
-                
-                success_text = f"""
+                if success:
+                    # Получаем количество дополнительных анализов
+                    updated_user_data = await db.get_user(user_id)
+                    additional_analyses = updated_user_data.get('additional_analyses', 0)
+                    
+                    # Получаем информацию о плане для отображения
+                    plan = config.SUBSCRIPTION_PLANS.get(subscription_type, config.SUBSCRIPTION_PLANS['basic'])
+                    
+                    success_text = f"""
 ✅ <b>Платеж успешно обработан!</b>
 
-💎 <b>{plan['name']} активирована</b>
+💎 <b>Подписка {plan_name} активирована!</b>
 
-На ваш счет начислено: <b>{analyses_to_add} анализов</b>
+📊 <b>Месячный лимит:</b> {monthly_limit} анализов
+{f'💰 Дополнительные анализы: <b>{additional_analyses}</b>' if additional_analyses > 0 else ''}
 
-Теперь вам доступно:
-• {plan['analyses_per_month']} анализов в месяц
+<b>Что входит:</b>
 {chr(10).join([f"• {feature}" for feature in plan['features']])}
 
 <b>ID платежа:</b> <code>{payment.id}</code>
-                """
+
+💡 <b>Информация:</b>
+• Месячный лимит обновляется каждый месяц
+• Дополнительные анализы можно купить отдельно
+                    """
+                    
+                    logger.info(f"Платеж {payment_id} успешно обработан для пользователя {user_id}")
+                else:
+                    logger.error(f"Не удалось обработать платеж {payment_id} для пользователя {user_id}")
+                    success_text = f"""
+❌ <b>Ошибка обработки платежа</b>
+
+Не удалось активировать подписку. Пожалуйста, свяжитесь с поддержкой.
+
+<b>ID платежа:</b> <code>{payment.id}</code>
+                    """
             else:
                 success_text = f"""
 ✅ <b>Платеж успешно обработан!</b>
@@ -1385,7 +1656,13 @@ async def manual_check_payment(callback: CallbackQuery, db: Database):
 <b>ID платежа:</b> <code>{payment.id}</code>
                 """
             
-            await callback.message.edit_text(
+            # Удаляем inline-сообщение
+            try:
+                await callback.message.delete()
+            except:
+                pass
+            # Отправляем новое сообщение с главным меню
+            await callback.message.answer(
                 success_text,
                 reply_markup=get_main_keyboard(),
                 parse_mode="HTML"
@@ -1399,6 +1676,8 @@ async def manual_check_payment(callback: CallbackQuery, db: Database):
 <b>ID платежа:</b> <code>{payment.id}</code>
 
 Платеж еще обрабатывается. Попробуйте проверить статус через несколько минут.
+
+<i>Обычно обработка платежа занимает 1-3 минуты.</i>
             """
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1419,10 +1698,11 @@ async def manual_check_payment(callback: CallbackQuery, db: Database):
             )
             
     except Exception as e:
-        logger.error(f"Ошибка ручной проверки платежа: {e}")
+        logger.error(f"Ошибка ручной проверки платежа {payment_id}: {e}", exc_info=True)
         await callback.message.edit_text(
             "❌ <b>Ошибка проверки платежа</b>\n\n"
-            "Попробуйте позже или свяжитесь с поддержкой.",
+            "Попробуйте позже или свяжитесь с поддержкой.\n\n"
+            f"<i>Детали ошибки: {str(e)[:100]}</i>",
             parse_mode="HTML"
         )
 
