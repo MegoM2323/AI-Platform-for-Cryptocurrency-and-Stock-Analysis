@@ -28,6 +28,23 @@ class Config:
     # Twelve Data API
     TWELVE_DATA_API_KEY = os.getenv('TWELVE_DATA_API_KEY')
     
+    # NewsAPI (новостной фон для анализа)
+    NEWSAPI_KEY = os.getenv('NEWSAPI_KEY')
+    NEWSAPI_BASE_URL = os.getenv('NEWSAPI_BASE_URL', 'https://newsapi.org/v2')
+    NEWSAPI_TIMEOUT_SECONDS = float(os.getenv('NEWSAPI_TIMEOUT_SECONDS', 10))
+    NEWSAPI_MAX_RETRIES = int(os.getenv('NEWSAPI_MAX_RETRIES', 3))
+    NEWSAPI_BACKOFF_SECONDS = float(os.getenv('NEWSAPI_BACKOFF_SECONDS', 1.0))
+    
+    # NewsAPI Rate Limits
+    NEWSAPI_MONTHLY_LIMIT = int(os.getenv('NEWSAPI_MONTHLY_LIMIT', 500))
+    NEWSAPI_DAILY_LIMIT = int(os.getenv('NEWSAPI_DAILY_LIMIT', 50))
+    NEWSAPI_RESERVED_USER_PERCENT = int(os.getenv('NEWSAPI_RESERVED_USER_PERCENT', 20))  # % квоты зарезервировано под запросы пользователей
+    NEWS_CACHE_HOURS = int(os.getenv('NEWS_CACHE_HOURS', 24))
+
+    # Report Generation
+    PDF_TEMPLATE_PATH = os.getenv('PDF_TEMPLATE_PATH', './templates/')
+    CHART_CACHE_DIR = os.getenv('CHART_CACHE_DIR', './charts/')
+    
     # YooKassa Payment System
     YOOKASSA_SHOP_ID = os.getenv('YOOKASSA_SHOP_ID')
     YOOKASSA_SECRET_KEY = os.getenv('YOOKASSA_SECRET_KEY')

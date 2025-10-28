@@ -36,6 +36,34 @@ active_payment_checks = {}
 # Словарь для хранения обработанных платежей (защита от дублирования)
 processed_payments = {}
 
+# Админ-команда для мониторинга квоты новостей
+from data_collectors import RateLimiter
+_news_rate_limiter = RateLimiter()
+
+@router.message(Command("news_quota"))
+async def news_quota(message: Message):
+    # Простейшая проверка прав: разрешить только владельцу чата/бота через username-список (если настроен)
+    admin_usernames = getattr(message.bot, 'admin_usernames', []) or []
+    username = (getattr(message.from_user, 'username', '') or '').lower()
+    if admin_usernames and username not in [u.lower() for u in admin_usernames]:
+        await message.answer("Доступ ограничен")
+        return
+    stats = _news_rate_limiter.get_usage_stats()
+    daily_ratio = stats['daily_used'] / max(1, stats['daily_limit'])
+    monthly_ratio = stats['monthly_used'] / max(1, stats['monthly_limit'])
+    warn = []
+    if monthly_ratio >= 0.9 or daily_ratio >= 0.9:
+        warn.append("⚠️ Квота близка к исчерпанию (>=90%)")
+    elif monthly_ratio >= 0.8 or daily_ratio >= 0.8:
+        warn.append("ℹ️ Достигнут порог 80% по квоте")
+    msg = (
+        f"NewsAPI usage:\n"
+        f"• daily {stats['daily_used']}/{stats['daily_limit']}\n"
+        f"• monthly {stats['monthly_used']}/{stats['monthly_limit']}\n"
+        + ("\n".join(warn) if warn else "")
+    )
+    await message.answer(msg)
+
 async def start_payment_monitoring(payment_id: str, user_id: int, payment_type: str, db: Database, bot, timeout_minutes: int = 10):
     """Запустить мониторинг платежа с автоматической проверкой"""
     try:

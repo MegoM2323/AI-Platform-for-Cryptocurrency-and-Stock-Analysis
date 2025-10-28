@@ -3,11 +3,13 @@
 """
 
 import aiosqlite
+import asyncio
 from datetime import datetime, date
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 from pathlib import Path
 
 from .models import ALL_SCHEMAS
+from .news_models import NewsArticle
 
 
 class Database:
@@ -15,13 +17,123 @@ class Database:
     
     def __init__(self, db_path: Path):
         self.db_path = db_path
+        self._pool_lock = asyncio.Semaphore(5)
         
     async def init_db(self):
         """Инициализация базы данных - создание таблиц"""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._pool_lock:
+            db = await aiosqlite.connect(self.db_path)
             for schema in ALL_SCHEMAS:
                 await db.execute(schema)
             await db.commit()
+            await db.close()
+
+    # -------------------
+    # News storage layer
+    # -------------------
+    async def save_news_articles(self, articles: List[NewsArticle]) -> int:
+        """Сохранить список новостных статей (upsert по id). Возвращает число сохраненных записей."""
+        if not articles:
+            return 0
+        saved = 0
+        async with self._pool_lock:
+            db = await aiosqlite.connect(self.db_path)
+            for a in articles:
+                try:
+                    await db.execute(
+                        """
+                        INSERT OR IGNORE INTO news_articles (
+                            id, title, description, content, url, published_at, source, symbol, sentiment_score, relevance_score
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            a.id, a.title, a.description, a.content, a.url,
+                            a.published_at.isoformat() if a.published_at else None,
+                            a.source, a.symbol, a.sentiment_score, a.relevance_score
+                        )
+                    )
+                    saved += 1
+                except Exception:
+                    # Пропускаем дубликаты/ошибки отдельных статей, продолжаем сохранять остальные
+                    pass
+            await db.commit()
+            await db.close()
+        return saved
+
+    async def get_recent_news(self, symbol: str, hours: int = 24, limit: int = 50) -> List[Dict[str, Any]]:
+        """Получить новости по символу за последние N часов."""
+        async with self._pool_lock:
+            db = await aiosqlite.connect(self.db_path)
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT * FROM news_articles
+                WHERE symbol = ? AND published_at >= datetime('now', ?)
+                ORDER BY published_at DESC
+                LIMIT ?
+                """,
+                (symbol, f'-{hours} hours', limit)
+            ) as cursor:
+                rows = await cursor.fetchall()
+            await db.close()
+            return [dict(r) for r in rows]
+
+    async def get_cached_analysis(self, symbol: str, analysis_type: str) -> Optional[str]:
+        """Получить кэшированный результат анализа, если не истек срок."""
+        async with self._pool_lock:
+            db = await aiosqlite.connect(self.db_path)
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT result_data FROM analysis_cache
+                WHERE symbol = ? AND analysis_type = ? AND (expires_at IS NULL OR expires_at > datetime('now'))
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (symbol, analysis_type)
+            ) as cursor:
+                row = await cursor.fetchone()
+            await db.close()
+            return row['result_data'] if row else None
+
+    async def set_cached_analysis(self, symbol: str, analysis_type: str, result_data: str, ttl_seconds: int) -> None:
+        """Сохранить кэш результата анализа на ttl_seconds секунд."""
+        async with self._pool_lock:
+            db = await aiosqlite.connect(self.db_path)
+            await db.execute(
+                """
+                INSERT INTO analysis_cache (symbol, analysis_type, result_data, expires_at)
+                VALUES (?, ?, ?, datetime('now', ?))
+                """,
+                (symbol, analysis_type, result_data, f'+{ttl_seconds} seconds')
+            )
+            await db.commit()
+            await db.close()
+
+    async def cleanup_expired_cache(self) -> int:
+        """Удалить просроченные записи кэша. Возвращает число удалённых записей."""
+        async with self._pool_lock:
+            db = await aiosqlite.connect(self.db_path)
+            cur = await db.execute(
+                "DELETE FROM analysis_cache WHERE expires_at IS NOT NULL AND expires_at <= datetime('now')"
+            )
+            await db.commit()
+            rowcount = cur.rowcount or 0
+            await db.close()
+            return rowcount
+
+    async def cleanup_old_news(self, older_than_hours: int = 24 * 14) -> int:
+        """Удалить слишком старые новости (по умолчанию старше 14 дней). Возвращает число удалённых записей."""
+        async with self._pool_lock:
+            db = await aiosqlite.connect(self.db_path)
+            cur = await db.execute(
+                "DELETE FROM news_articles WHERE published_at < datetime('now', ?)",
+                (f'-{older_than_hours} hours',)
+            )
+            await db.commit()
+            rowcount = cur.rowcount or 0
+            await db.close()
+            return rowcount
     
     async def get_user(self, user_id: int) -> Optional[Dict]:
         """Получить пользователя по ID"""

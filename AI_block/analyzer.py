@@ -1,11 +1,11 @@
 """
-AI анализ данных через OpenRouter API
+AI анализ данных через OpenRouter API (через HTTP, без зависимости openai)
 """
 
-from openai import OpenAI
 from typing import Optional
 import asyncio
 from functools import partial
+import requests
 
 from .prompts import SYSTEM_PROMPT, create_analysis_prompt
 
@@ -21,10 +21,7 @@ class AIAnalyzer:
             api_key: API ключ OpenRouter
             model: Модель для использования (по умолчанию бесплатная модель)
         """
-        self.client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=api_key
-        )
+        self.api_key = api_key
         self.model = model
     
     async def analyze_crypto(self, market_data: str, symbol: str) -> Optional[str]:
@@ -85,36 +82,37 @@ class AIAnalyzer:
         logger = logging.getLogger(__name__)
         
         try:
-            logger.debug(f"Отправляем запрос к AI API, модель: {self.model}")
-            
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": SYSTEM_PROMPT
-                    },
-                    {
-                        "role": "user",
-                        "content": user_prompt
-                    }
+            logger.debug(f"Отправляем запрос к OpenRouter, модель: {self.model}")
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "HTTP-Referer": "https://example.com",
+                "X-Title": "AI-Platform",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": self.model,
+                "temperature": 0.7,
+                "max_tokens": 2000,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
                 ],
-                temperature=0.7,
-                max_tokens=2000
-            )
-            
-            if response and response.choices and len(response.choices) > 0:
-                content = response.choices[0].message.content
+            }
+            resp = requests.post(url, headers=headers, json=payload, timeout=60)
+            resp.raise_for_status()
+            data = resp.json()
+            choices = (data or {}).get("choices") or []
+            if choices:
+                content = (choices[0].get("message") or {}).get("content")
                 logger.debug(f"AI API вернул ответ длиной {len(content) if content else 0} символов")
                 if content:
                     logger.debug(f"Первые 100 символов ответа: {content[:100]}")
                 return content or ""
-            else:
-                logger.error("AI API вернул пустой ответ")
-                return ""
-                
+            logger.error("AI API вернул пустой ответ")
+            return ""
         except Exception as e:
-            logger.error(f"Ошибка при вызове AI API: {e}")
+            logger.error(f"Ошибка при вызове OpenRouter: {e}")
             raise
     
     async def quick_analysis(self, market_data: str, symbol: str) -> Optional[str]:

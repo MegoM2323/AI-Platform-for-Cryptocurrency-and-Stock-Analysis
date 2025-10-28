@@ -5,8 +5,7 @@ aiohttp>=3.9.5
 # Data Collection
 twelvedata[pandas]>=1.2.25
 
-# AI Integration
-openai>=1.35.3
+# AI Integration (через OpenRouter REST, без openai пакета)
 
 # Environment Variables
 python-dotenv>=1.0.1
@@ -17,6 +16,19 @@ aiosqlite>=0.20.0
 
 # Utilities
 requests>=2.32.3
+
+# News API client (Context7-guided)
+newsapi-python>=0.2.7
+
+# Reports generation
+reportlab>=4.2.2
+matplotlib>=3.9.2
+pillow>=10.4.0
+
+# Testing
+pytest>=8.3.3
+pytest-asyncio>=0.24.0
+pytest-mock>=3.14.0
 
 # Payment System
 aiohttp>=3.9.5
