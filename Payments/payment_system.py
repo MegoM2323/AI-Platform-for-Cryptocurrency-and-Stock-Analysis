@@ -146,7 +146,7 @@ class YooKassaClient:
                     json=payment_data,
                     headers=headers
                 ) as response:
-                    if response.status == 200:
+                    if response.status in (200, 201):
                         result = await response.json()
                         
                         payment = PaymentData(
@@ -577,6 +577,89 @@ class PaymentManager:
         if not self.nowpayments:
             logger.error("NOWPayments не инициализирована")
             return None
+
+    async def create_token_purchase_payment(
+        self,
+        user_id: int,
+        package_key: str,
+        package_name: str,
+        tokens: int,
+        amount_rub: float,
+        description: str,
+        user_email: str = None,
+    ) -> Optional[PaymentData]:
+        """Создать fiat-платёж (ЮКасса) на покупку токенов."""
+        if not self.yookassa:
+            logger.warning("ЮКасса не инициализирована")
+            return None
+
+        metadata = {
+            "user_id": str(user_id),
+            "payment_type": "token_purchase",
+            "package_key": package_key,
+            "package_name": package_name,
+            "tokens": str(tokens),
+        }
+
+        # Возвращаемся в бот после оплаты; используем username, как в подписках
+        try:
+            return_url = f"https://t.me/{getattr(config, 'TELEGRAM_BOT_USERNAME', '')}?start=payment_success"
+        except Exception:
+            return_url = "https://t.me/"
+        receipt = None
+        try:
+            receipt = self.yookassa._create_receipt(amount_rub, description, user_email)
+        except Exception:
+            receipt = None
+
+        payment = await self.yookassa.create_payment(
+            amount=amount_rub,
+            description=description,
+            return_url=return_url,
+            metadata=metadata,
+            receipt=receipt,
+        )
+        return payment
+
+    async def create_crypto_token_purchase_payment(
+        self,
+        user_id: int,
+        package_key: str,
+        package_name: str,
+        tokens: int,
+        amount_rub: float,
+        description: str,
+        crypto_currency: str = "USDT",
+    ) -> Optional[NOWPaymentData]:
+        """Создать криптоплатёж (NOWPayments) на покупку токенов."""
+        if not self.nowpayments:
+            logger.warning("NOWPayments не инициализирована")
+            return None
+
+        order_id = f"tok_{user_id}_{package_key}_{uuid.uuid4().hex[:8]}"
+        ipn_callback_url = f"https://t.me/{getattr(config, 'TELEGRAM_BOT_USERNAME', '')}/webhook/nowpayments"
+
+        metadata = {
+            "user_id": str(user_id),
+            "payment_type": "token_purchase",
+            "package_key": package_key,
+            "package_name": package_name,
+            "tokens": str(tokens),
+        }
+
+        payment = await self.nowpayments.create_payment(
+            price_amount=amount_rub,
+            price_currency="RUB",
+            pay_currency=crypto_currency,
+            order_id=order_id,
+            order_description=description,
+            ipn_callback_url=ipn_callback_url,
+            customer_email=None,
+            payout_address=getattr(config, 'NOWPAYMENTS_PAYOUT_ADDRESS', None),
+            payout_currency=getattr(config, 'NOWPAYMENTS_PAYOUT_CURRENCY', 'BTC'),
+            metadata=metadata,
+        )
+        return payment
         
         try:
             # Генерируем уникальный ID заказа

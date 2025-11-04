@@ -20,6 +20,7 @@ class Config:
     
     # Telegram Bot
     TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+    ADMIN_USER_ID = os.getenv('ADMIN_USER_ID')  # ID администратора для админ-команд
     
     # OpenRouter API
     OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
@@ -62,14 +63,14 @@ class Config:
     # Database
     DATABASE_PATH = BASE_DIR / os.getenv('DATABASE_PATH', 'crypto_analysis.db')
     
-    # Subscription Limits (Monthly)
+    # Subscription Limits (Monthly) - DEPRECATED: Используются только для миграции и совместимости
     FREE_ANALYSES_PER_MONTH = int(os.getenv('FREE_ANALYSES_PER_MONTH', 3))
     BASIC_ANALYSES_PER_MONTH = int(os.getenv('BASIC_ANALYSES_PER_MONTH', 15))
     TRADER_ANALYSES_PER_MONTH = int(os.getenv('TRADER_ANALYSES_PER_MONTH', 50))
     PRO_ANALYSES_PER_MONTH = int(os.getenv('PRO_ANALYSES_PER_MONTH', 150))
     ELITE_ANALYSES_PER_MONTH = int(os.getenv('ELITE_ANALYSES_PER_MONTH', 500))
     
-    # Subscription Plans (Monthly)
+    # Subscription Plans (Monthly) - DEPRECATED: Используются только для миграции и совместимости
     SUBSCRIPTION_PLANS = {
         'free': {
             'name': 'Free',
@@ -105,6 +106,43 @@ class Config:
             'price': 2990,
             'analyses_per_month': 500,
             'features': ['500 анализов в месяц', 'Полный анализ', 'Приоритетная скорость', "Ранний доступ к функциям"]
+        }
+    }
+    
+    # Token System - Стоимость анализов в токенах
+    BASIC_ANALYSIS_COST = 3
+    ENHANCED_ANALYSIS_COST = 10
+    INITIAL_TOKEN_BONUS = 10
+    
+    # Token Packages - Пакеты токенов для покупки
+    TOKEN_PACKAGES = {
+        'starter': {
+            'name': 'Стартовый',
+            'tokens': 50,
+            'price_rub': 299,
+            'price_usd': 3.5,
+            'analyses_equivalent': '16 базовых или 5 расширенных'
+        },
+        'standard': {
+            'name': 'Стандартный',
+            'tokens': 200,
+            'price_rub': 999,
+            'price_usd': 11.5,
+            'analyses_equivalent': '66 базовых или 20 расширенных'
+        },
+        'pro': {
+            'name': 'Профессиональный',
+            'tokens': 500,
+            'price_rub': 1990,
+            'price_usd': 23,
+            'analyses_equivalent': '166 базовых или 50 расширенных'
+        },
+        'ultimate': {
+            'name': 'Максимальный',
+            'tokens': 1500,
+            'price_rub': 4990,
+            'price_usd': 58,
+            'analyses_equivalent': '500 базовых или 150 расширенных'
         }
     }
     

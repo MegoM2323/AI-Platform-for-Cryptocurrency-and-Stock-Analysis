@@ -7,9 +7,10 @@ from aiogram.filters import Command
 from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 
-from ..keyboards import get_main_keyboard
+from ..keyboards import get_main_keyboard, get_main_keyboard_with_balance
 from database import Database
 from config import config
+from ..token_manager import TokenManager
 
 router = Router()
 
@@ -29,27 +30,29 @@ async def cmd_start(message: Message, state: FSMContext, db: Database):
         last_name=user.last_name
     )
     
+    tm = TokenManager(db)
+    balance = await tm.get_balance(user.id)
     welcome_text = f"""
 👋 <b>Привет, {user.first_name}!</b>
 
-Я — AI бот для анализа криптовалют. Я помогу тебе:
+Я — AI бот для анализа криптовалют. Помогу тебе:
 
 📊 Анализировать токены
 📈 Отслеживать тренды
 💡 Принимать взвешенные решения
 
-<b>Доступные команды:</b>
-/analyze - Анализ криптовалюты
-/help - Помощь
-/profile - Твой профиль
-/subscribe - Управление подпиской
+<b>Стоимость анализов:</b>
+• Базовый: <b>{config.BASIC_ANALYSIS_COST}</b> токенов
+• Расширенный: <b>{config.ENHANCED_ANALYSIS_COST}</b> токенов
 
-<b>Тарифные планы:</b>
-🆓 Free: {config.FREE_ANALYSES_PER_MONTH} анализов в месяц
-🥉 Basic: {config.BASIC_ANALYSES_PER_MONTH} анализов в месяц - 299₽
-🥈 Trader: {config.TRADER_ANALYSES_PER_MONTH} анализов в месяц - 899₽
-🥇 Pro: {config.PRO_ANALYSES_PER_MONTH} анализов в месяц - 1590₽
-💎 Elite: {config.ELITE_ANALYSES_PER_MONTH} анализов в месяц - 2990₽
+<b>Баланс:</b> <b>{balance}</b> токенов
+
+<b>Команды:</b>
+/analyze — начать анализ
+/enhanced — расширенный анализ
+/balance — показать баланс
+/buy_tokens — купить токены
+/help — помощь
 
 Выбери действие из меню ниже 👇
 """
@@ -67,43 +70,56 @@ async def cmd_help(message: Message, state: FSMContext):
     """Обработчик команды /help"""
     await state.clear()
     
-    help_text = """
+    # Отображаем актуальный баланс в справке
+    tm = TokenManager(message.bot['db']) if isinstance(message.bot, dict) and 'db' in message.bot else None
+    try:
+        balance = await TokenManager(message.bot['db']).get_balance(message.from_user.id) if tm else 0
+    except Exception:
+        balance = 0
+
+    help_text = f"""
 📖 <b>РУКОВОДСТВО ПО ИСПОЛЬЗОВАНИЮ</b>
 
 <b>Как использовать бота:</b>
 
-1️⃣ <b>Анализ токена</b>
-   • Нажми "📊 Анализ токена"
+1️⃣ <b>Базовый анализ</b>
+   • Нажми "📊 Анализ токена" или используй /analyze
    • Введи символ криптовалюты (например: BTC, ETH, SOL)
-   • Получи AI анализ
+   • Стоимость: <b>{config.BASIC_ANALYSIS_COST}</b> токенов
 
-2️⃣ <b>Подписка</b>
-   • Нажми "💎 Подписка"
-   • Выбери тариф
-   • Следуй инструкциям по оплате
+2️⃣ <b>Расширенный анализ</b>
+   • Используй команду /enhanced
+   • Введи символ криптовалюты
+   • Получишь серию сообщений в Telegram (без PDF)
+   • Стоимость: <b>{config.ENHANCED_ANALYSIS_COST}</b> токенов
+   • ⚠️ <b>Анализ выполняется на дневном таймфрейме</b>
 
-3️⃣ <b>Профиль</b>
+3️⃣ <b>Покупка токенов</b>
+   • Нажми "💰 Купить токены" или /buy_tokens
+   • Выбери пакет токенов (есть эквивалент в анализах)
+   • Оплата: <b>банковская карта (ЮКасса)</b>
+
+4️⃣ <b>Профиль</b>
    • Нажми "📈 Мой профиль"
-   • Посмотри свою статистику
+   • Посмотри историю и статус
 
-<b>Доступные команды:</b>
-/start - Начать работу
-/analyze - Анализ криптовалюты
-/profile - Твой профиль
-/subscribe - Подписка
-/help - Эта справка
+💰 <b>Текущий баланс:</b> <b>{balance}</b> токенов
 
-<b>Примеры использования:</b>
-• BTC - Bitcoin
-• ETH - Ethereum
-• SOL - Solana
-• BNB - Binance Coin
+<b>Команды:</b>
+/start — Начать работу
+/analyze — Базовый анализ
+/enhanced — Расширенный анализ
+/balance — Баланс
+/buy_tokens — Купить токены
+/history — История транзакций
+/help — Эта справка
+
+<b>Примеры символов:</b> BTC, ETH, SOL, BNB
 
 ⚠️ <b>Важно:</b>
-Анализ не является финансовым советом!
-Всегда проводи собственное исследование.
+Анализ не является финансовым советом. Проводите собственное исследование.
 
-❓ Вопросы? Напиши в поддержку: @your_support
+❓ Вопросы? Поддержка: @your_support
 """
     
     await message.answer(
@@ -116,87 +132,27 @@ async def cmd_help(message: Message, state: FSMContext):
 @router.message(F.text == "📈 Мой профиль")
 @router.message(Command("profile"))
 async def cmd_profile(message: Message, db: Database):
-    """Показать профиль пользователя"""
+    """Показать профиль пользователя (по токенам)."""
     user_id = message.from_user.id
-    user_data = await db.get_user(user_id)
-    
-    if not user_data:
-        await message.answer("❌ Пользователь не найден. Используй /start")
-        return
-    
-    # Получаем план подписки
-    subscription_plan = await db.get_user_subscription_plan(user_id)
-    
-    # Определяем лимиты в зависимости от плана
-    if subscription_plan == 'free':
-        max_analyses = config.FREE_ANALYSES_PER_MONTH
-    elif subscription_plan == 'basic':
-        max_analyses = config.BASIC_ANALYSES_PER_MONTH
-    elif subscription_plan == 'trader':
-        max_analyses = config.TRADER_ANALYSES_PER_MONTH
-    elif subscription_plan == 'pro':
-        max_analyses = config.PRO_ANALYSES_PER_MONTH
-    elif subscription_plan == 'elite':
-        max_analyses = config.ELITE_ANALYSES_PER_MONTH
-    else:
-        max_analyses = config.FREE_ANALYSES_PER_MONTH
-    
-    # Получаем оставшиеся анализы
-    remaining = await db.get_remaining_analyses(
-        user_id, 
-        config.FREE_ANALYSES_PER_MONTH,
-        max_analyses
-    )
-    
-    # Получаем информацию о тарифе
-    plan_name = config.SUBSCRIPTION_PLANS.get(subscription_plan, {}).get('name', 'Free')
-    is_premium = user_data.get('is_premium', 0)
-    premium_text = "✅ Активна" if is_premium else "❌ Не активна"
-    
-    if is_premium and user_data.get('premium_until'):
-        from datetime import datetime
-        premium_until = datetime.fromisoformat(user_data['premium_until'])
-        premium_text += f"\n📅 До: {premium_until.strftime('%d.%m.%Y')}"
-    
-    # Получаем количество анализов за месяц
-    from datetime import date
-    current_month = date.today().replace(day=1)
-    monthly_analyses = await db.get_monthly_analyses_count(user_id, current_month)
-    
-    # Получаем дополнительные анализы из БД
-    additional_analyses = user_data.get('additional_analyses', 0)
-    
-    # Получаем историю анализов
-    analyses = await db.get_user_analyses(user_id, limit=5)
-    
-    profile_text = f"""
-👤 <b>ТВОЙ ПРОФИЛЬ</b>
+    await db.get_or_create_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
+    tm = TokenManager(db)
+    balance = await tm.get_balance(user_id)
+    history = await tm.get_transaction_history(user_id, limit=5)
 
-<b>ID:</b> {user_id}
-<b>Имя:</b> {user_data.get('first_name', 'N/A')}
-<b>Username:</b> @{user_data.get('username', 'N/A')}
+    lines = [
+        "📈 <b>ПРОФИЛЬ</b>",
+        f"\n💰 <b>Баланс токенов:</b> {balance}",
+    ]
+    if history:
+        lines.append("\n🧾 <b>Последние транзакции:</b>")
+        for tx in history:
+            amount = tx.get("amount", 0)
+            ttype = tx.get("transaction_type", "")
+            created = tx.get("created_at", "")
+            lines.append(f"• {created} — {ttype}: {amount:+d}")
 
-💎 <b>Тариф:</b> {plan_name}
-<b>Статус:</b> {premium_text}
-
-📊 <b>Анализы:</b>
-• Лимит в месяц: {max_analyses}
-• Использовано: {monthly_analyses}
-• Осталось в месяце: {max(0, max_analyses - monthly_analyses)}
-
-📈 <b>Последние анализы ({len(analyses)}):</b>
-"""
-    
-    if analyses:
-        for i, analysis in enumerate(analyses, 1):
-            from datetime import datetime
-            created_at = datetime.fromisoformat(analysis['created_at'])
-            profile_text += f"\n{i}. {analysis['token_symbol']} - {created_at.strftime('%d.%m %H:%M')}"
-    else:
-        profile_text += "\nПока нет анализов"
-    
     await message.answer(
-        profile_text,
+        "\n".join(lines),
         reply_markup=get_main_keyboard(),
         parse_mode="HTML"
     )

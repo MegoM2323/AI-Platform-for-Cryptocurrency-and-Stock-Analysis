@@ -4,7 +4,7 @@
 
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove, BufferedInputFile
 from aiogram.fsm.context import FSMContext
 
 from ..states import AnalysisStates
@@ -13,148 +13,52 @@ from database import Database
 from config import config
 from data_collectors import CryptoCollector, DataFormatter
 from AI_block import AIAnalyzer
+from ..token_manager import TokenManager
 
 router = Router()
+
+
+@router.message(F.text == "🚀 Расширенный анализ")
+async def start_enhanced_analysis_button(message: Message, state: FSMContext, db: Database):
+    """Обработчик кнопки расширенного анализа (модель токенов)."""
+    tm = TokenManager(db)
+    balance = await tm.get_balance(message.from_user.id)
+    await message.answer(
+        (
+            "🚀 <b>Расширенный анализ</b>\n\n"
+            f"Стоимость: <b>{config.ENHANCED_ANALYSIS_COST}</b> ток.\n"
+            f"Текущий баланс: <b>{balance}</b> ток.\n\n"
+            "Отправь символ криптовалюты (например: BTC).\n"
+            "Результат будет отправлен в виде серии сообщений в Telegram.\n\n"
+            "⚠️ <b>Анализ выполняется на дневном таймфрейме</b>"
+        ),
+        reply_markup=ReplyKeyboardRemove(),
+        parse_mode="HTML"
+    )
+    await state.update_data(enhanced_mode=True)
+    await state.set_state(AnalysisStates.waiting_for_symbol)
 
 
 @router.message(F.text == "📊 Анализ токена")
 @router.message(Command("analyze"))
 async def start_analysis(message: Message, state: FSMContext, db: Database):
-    """Начать процесс анализа"""
+    """Начать процесс анализа (токеновая модель)."""
     user_id = message.from_user.id
-    
-    # Получаем план подписки пользователя
-    subscription_plan = await db.get_user_subscription_plan(user_id)
-    
-    # Определяем лимиты в зависимости от плана
-    if subscription_plan == 'free':
-        max_analyses = config.FREE_ANALYSES_PER_MONTH
-    elif subscription_plan == 'basic':
-        max_analyses = config.BASIC_ANALYSES_PER_MONTH
-    elif subscription_plan == 'trader':
-        max_analyses = config.TRADER_ANALYSES_PER_MONTH
-    elif subscription_plan == 'pro':
-        max_analyses = config.PRO_ANALYSES_PER_MONTH
-    elif subscription_plan == 'elite':
-        max_analyses = config.ELITE_ANALYSES_PER_MONTH
-    elif subscription_plan == 'premium':
-        # Для общего премиум статуса определяем по дополнительным анализам
-        additional_analyses = await db.get_additional_analyses(user_id)
-        if additional_analyses >= 500:
-            max_analyses = config.ELITE_ANALYSES_PER_MONTH
-        elif additional_analyses >= 150:
-            max_analyses = config.PRO_ANALYSES_PER_MONTH
-        elif additional_analyses >= 50:
-            max_analyses = config.TRADER_ANALYSES_PER_MONTH
-        else:
-            max_analyses = config.BASIC_ANALYSES_PER_MONTH
-    else:
-        max_analyses = config.FREE_ANALYSES_PER_MONTH
-    
-    # Проверяем лимит анализов
-    can_analyze = await db.check_analysis_limit(
-        user_id,
-        config.FREE_ANALYSES_PER_MONTH,
-        max_analyses
-    )
-    
-    if not can_analyze:
-        plan_name = config.SUBSCRIPTION_PLANS.get(subscription_plan, {}).get('name', 'Free')
-        
-        # Получаем оставшиеся анализы
-        remaining = await db.get_remaining_analyses(
-            user_id,
-            config.FREE_ANALYSES_PER_MONTH,
-            max_analyses
-        )
-        
-        # Проверяем дополнительные анализы
-        additional_analyses = await db.get_additional_analyses(user_id)
-        
-        if additional_analyses > 0:
-            # Есть дополнительные анализы, предлагаем их использовать
-            limit_text = f"""
-❌ <b>Лимит анализов исчерпан!</b>
+    token_manager = TokenManager(db)
+    balance = await token_manager.get_balance(user_id)
 
-Ты использовал все доступные анализы в этом месяце.
-
-<b>Твой тариф:</b> {plan_name}
-<b>Лимит:</b> {max_analyses} анализов в месяц
-<b>Дополнительные анализы:</b> {additional_analyses}
-
-У тебя есть дополнительные анализы! Хочешь использовать один?
-"""
-            from ..keyboards import InlineKeyboardMarkup, InlineKeyboardButton
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Использовать дополнительный анализ", callback_data=f"use_additional_analysis_{user_id}")],
-                [InlineKeyboardButton(text="💎 Купить подписку", callback_data="show_subscriptions")],
-                [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_analysis")]
-            ])
-            
-            # Убираем reply-клавиатуру перед показом inline-кнопок
-            await message.answer(
-                limit_text,
-                reply_markup=ReplyKeyboardRemove(),
-                parse_mode="HTML"
-            )
-            # Теперь отправляем сообщение с inline-кнопками
-            await message.answer(
-                "Выберите действие:",
-                reply_markup=keyboard
-            )
-        else:
-            # Нет дополнительных анализов, предлагаем подписку
-            limit_text = f"""
-❌ <b>Лимит анализов исчерпан!</b>
-
-Ты использовал все доступные анализы в этом месяце.
-
-<b>Твой тариф:</b> {plan_name}
-<b>Лимит:</b> {max_analyses} анализов в месяц
-
-<b>💎 Доступные тарифы:</b>
-• 🥉 Basic - 299₽/мес (15 анализов)
-• 🥈 Trader - 899₽/мес (50 анализов)  
-• 🥇 Pro - 1590₽/мес (150 анализов)
-• 💎 Elite - 2990₽/мес (500 анализов)
-
-Выбери подходящий тариф:
-"""
-            from ..keyboards import InlineKeyboardMarkup, InlineKeyboardButton
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💎 Выбрать подписку", callback_data="show_subscriptions")],
-                [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_analysis")]
-            ])
-            
-            # Убираем reply-клавиатуру перед показом inline-кнопок
-            await message.answer(
-                limit_text,
-                reply_markup=ReplyKeyboardRemove(),
-                parse_mode="HTML"
-            )
-            # Теперь отправляем сообщение с inline-кнопками
-            await message.answer(
-                "Выберите действие:",
-                reply_markup=keyboard
-            )
-        return
-    
-    # Получаем оставшиеся анализы
-    remaining = await db.get_remaining_analyses(
-        user_id,
-        config.FREE_ANALYSES_PER_MONTH,
-        max_analyses
-    )
-    
     await state.set_state(AnalysisStates.waiting_for_symbol)
     await message.answer(
-        f"📊 <b>Анализ криптовалюты</b>\n\n"
-        f"Осталось анализов в месяце: <b>{remaining - 1}</b>\n\n"
-        f"Введи символ криптовалюты для анализа\n"
-        f"(например: BTC, ETH, SOL, BNB)\n\n"
-        f"Или нажми \"Отмена\" для выхода",
+        (
+            "📊 <b>Анализ криптовалюты</b>\n\n"
+            f"Стоимость: базовый — <b>{config.BASIC_ANALYSIS_COST}</b> ток., "
+            f"расширенный — <b>{config.ENHANCED_ANALYSIS_COST}</b> ток.\n"
+            f"Текущий баланс: <b>{balance}</b> ток.\n\n"
+            "Введи символ (например: BTC, ETH, SOL, BNB).\n\n"
+            "Или нажми \"Отмена\" для выхода"
+        ),
         reply_markup=get_cancel_keyboard(),
-        parse_mode="HTML"
+        parse_mode="HTML",
     )
 
 
@@ -199,12 +103,52 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
         )
         return
     
-    # Отправляем сообщение о начале анализа
-    processing_msg = await message.answer(
-        f"🔄 Анализирую {symbol}...\n"
-        f"Это может занять несколько секунд",
-        parse_mode="HTML"
+    # Определяем режим и стоимость; списываем токены заранее
+    data = await state.get_data()
+    enhanced_mode_prefetched = data.get('enhanced_mode', False)
+    cost = config.ENHANCED_ANALYSIS_COST if enhanced_mode_prefetched else config.BASIC_ANALYSIS_COST
+    token_manager = TokenManager(db)
+    user_balance = await token_manager.get_balance(user_id)
+    if user_balance < cost:
+        await message.answer(
+            (
+                "❌ Недостаточно токенов.\n\n"
+                f"Требуется: <b>{cost}</b> ток., на счёте: <b>{user_balance}</b> ток.\n"
+                "Пополнить баланс: /buy_tokens или через меню."
+            ),
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard(),
+        )
+        await state.clear()
+        return
+
+    debited = await token_manager.deduct_tokens(
+        user_id=user_id,
+        amount=cost,
+        transaction_type=("enhanced_analysis" if enhanced_mode_prefetched else "basic_analysis"),
+        description=f"Списание за анализ {symbol}",
     )
+    if not debited:
+        # Баланс мог измениться конкурентно
+        latest_balance = await token_manager.get_balance(user_id)
+        await message.answer(
+            (
+                "❌ Не удалось списать токены.\n\n"
+                f"Требуется: <b>{cost}</b> ток., на счёте: <b>{latest_balance}</b> ток."
+            ),
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard(),
+        )
+        await state.clear()
+        return
+
+    # Отправляем сообщение о начале анализа только для обычного режима
+    processing_msg = None
+    if not enhanced_mode_prefetched:
+        processing_msg = await message.answer(
+            f"🔄 Анализирую {symbol}...\nЭто может занять несколько секунд",
+            parse_mode="HTML",
+        )
     
     # Этап 1: Сбор данных
     try:
@@ -220,11 +164,18 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
         logger.info(f"Проверяем валидность символа {symbol}")
         if not collector.validate_symbol(symbol):
             logger.warning(f"Символ {symbol} не прошел валидацию")
-            await processing_msg.edit_text(
-                f"❌ Криптовалюта {symbol} не найдена.\n\n"
-                f"Проверь правильность символа и попробуй снова.\n"
-                f"Примеры: BTC, ETH, SOL, BNB"
-            )
+            if processing_msg:
+                await processing_msg.edit_text(
+                    f"❌ Криптовалюта {symbol} не найдена.\n\n"
+                    f"Проверь правильность символа и попробуй снова.\n"
+                    f"Примеры: BTC, ETH, SOL, BNB"
+                )
+            else:
+                await message.answer(
+                    f"❌ Криптовалюта {symbol} не найдена.\n\n"
+                    f"Проверь правильность символа и попробуй снова.\n"
+                    f"Примеры: BTC, ETH, SOL, BNB"
+                )
             return
         
         # Получаем данные
@@ -232,9 +183,14 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
         data = collector.get_crypto_data(symbol)
         if data is None or data.empty:
             logger.error(f"Не удалось получить данные для {symbol}")
-            await processing_msg.edit_text(
-                f"❌ Не удалось получить данные для {symbol}"
-            )
+            if processing_msg:
+                await processing_msg.edit_text(
+                    f"❌ Не удалось получить данные для {symbol}"
+                )
+            else:
+                await message.answer(
+                    f"❌ Не удалось получить данные для {symbol}"
+                )
             return
         
         logger.info(f"Данные получены: {data.shape[0]} записей")
@@ -244,10 +200,26 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
         
     except Exception as e:
         logger.error(f"Ошибка при сборе данных для {symbol}: {e}")
-        await processing_msg.edit_text(
-            "❌ Ошибка при получении данных.\n"
-            "Попробуй позже."
-        )
+        # Возврат токенов при сбое
+        try:
+            await token_manager.add_tokens(
+                user_id=user_id,
+                amount=cost,
+                transaction_type="refund",
+                description=f"Возврат за ошибку данных {symbol}",
+            )
+        except Exception:
+            pass
+        if processing_msg:
+            await processing_msg.edit_text(
+                "❌ Ошибка при получении данных.\n"
+                "Попробуй позже."
+            )
+        else:
+            await message.answer(
+                "❌ Ошибка при получении данных.\n"
+                "Попробуй позже."
+            )
         return
     
     # Этап 2: Форматирование данных
@@ -258,13 +230,99 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
         logger.info(f"Данные отформатированы: {len(formatted_data)} символов")
     except Exception as e:
         logger.error(f"Ошибка при форматировании данных для {symbol}: {e}")
-        await processing_msg.edit_text(
-            "❌ Ошибка при обработке данных.\n"
-            "Попробуй позже."
-        )
+        try:
+            await token_manager.add_tokens(
+                user_id=user_id,
+                amount=cost,
+                transaction_type="refund",
+                description=f"Возврат за ошибку форматирования {symbol}",
+            )
+        except Exception:
+            pass
+        if processing_msg:
+            await processing_msg.edit_text(
+                "❌ Ошибка при обработке данных.\n"
+                "Попробуй позже."
+            )
+        else:
+            await message.answer(
+                "❌ Ошибка при обработке данных.\n"
+                "Попробуй позже."
+            )
         return
     
-    # Этап 3: AI анализ
+    # Проверяем режим анализа (обычный или расширенный)
+    data = await state.get_data()
+    enhanced_mode = data.get('enhanced_mode', False)
+    
+    if enhanced_mode:
+        # Расширенный анализ с новостями
+        try:
+            logger.info(f"Запускаем расширенный анализ для {symbol}")
+            from .enhanced_analysis import _run_enhanced
+            
+            # Выполняем расширенный анализ
+            # Информационное сообщение на время выполнения
+            temp_msg = await message.answer("🔄 Выполняю расширенный анализ... Это может занять до 30–60 секунд.")
+            analysis_result, pdf_bytes, _, _ = await _run_enhanced(symbol, db)
+            
+            # Требование: отправлять только один месседж — PDF-отчет
+            if pdf_bytes:
+                pdf_caption = f"""
+📊 <b>ПОДРОБНЫЙ PDF-ОТЧЕТ {symbol}</b>
+
+📈 <b>Основные показатели:</b>
+• Общий скор: {analysis_result.get('overall_score', 0):.2f}/1.0
+• Уровень риска: {analysis_result.get('risk_level', 'N/A')}
+• Рекомендация: {analysis_result.get('recommendation', 'N/A').upper()}
+
+📰 <b>Анализ новостей:</b>
+• Проанализировано статей: {len(analysis_result.get('sentiment', {}).get('articles', []))}
+• Тональность: {analysis_result.get('sentiment', {}).get('overall', {}).get('label', 'N/A')}
+
+📋 <b>Содержание PDF:</b>
+• Executive Summary
+• Технический анализ с таблицами
+• Анализ настроений с новостями
+• Графики и визуализации
+• Ключевые моменты
+• Источники данных
+
+⚠️ <b>Важно:</b> Анализ основан на дневных данных (1d)
+                """
+                # Удаляем временное информационное сообщение
+                try:
+                    await temp_msg.delete()
+                except Exception:
+                    pass
+
+                await message.answer_document(
+                    document=BufferedInputFile(pdf_bytes, filename=f"{symbol}_detailed_analysis.pdf"),
+                    caption=pdf_caption,
+                    parse_mode="HTML"
+                )
+            
+            # Очищаем состояние
+            await state.clear()
+            return
+            
+        except Exception as e:
+            logger.error(f"Ошибка при расширенном анализе для {symbol}: {e}")
+            # Пытаемся удалить временное сообщение, если оно было отправлено
+            try:
+                if 'temp_msg' in locals() and temp_msg is not None:
+                    await temp_msg.delete()
+            except Exception:
+                pass
+            # Сообщаем пользователю об ошибке единым сообщением
+            await message.answer(
+                "❌ Ошибка при выполнении расширенного анализа. Попробуй позже.",
+                reply_markup=get_main_keyboard()
+            )
+            await state.clear()
+            return
+    
+    # Обычный AI анализ
     try:
         logger.info("Запускаем AI анализ")
         analyzer = AIAnalyzer(
@@ -292,6 +350,15 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
         logger.info(f"AI анализ завершен: {len(analysis_result)} символов")
     except Exception as e:
         logger.error(f"Ошибка при AI анализе для {symbol}: {e}")
+        try:
+            await token_manager.add_tokens(
+                user_id=user_id,
+                amount=cost,
+                transaction_type="refund",
+                description=f"Возврат за ошибку AI {symbol}",
+            )
+        except Exception:
+            pass
         await processing_msg.edit_text(
             "❌ Ошибка при выполнении анализа.\n"
             "Попробуй позже."
@@ -359,6 +426,16 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
         error_details = traceback.format_exc()
         logger.error(f"Ошибка при сохранении/отправке результата для {symbol}: {e}")
         logger.error(f"Полная ошибка: {error_details}")
+        # Возврат токенов при сбое отправки/сохранения
+        try:
+            await token_manager.add_tokens(
+                user_id=user_id,
+                amount=cost,
+                transaction_type="refund",
+                description=f"Возврат за ошибку отправки {symbol}",
+            )
+        except Exception:
+            pass
         
         # Даже если произошла ошибка при сохранении, показываем результат
         logger.info("Показываем результат несмотря на ошибку")

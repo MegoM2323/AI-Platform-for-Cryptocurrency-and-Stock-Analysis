@@ -82,16 +82,21 @@ class RateLimiter:
         # Суточное окно: начинаем с 00:00 текущих суток
         if now - self._day_usage.start_ts >= 24 * 3600:
             self._day_usage = UsageWindow(start_ts=self._day_start(), count=0)
-        # Месячное окно: грубая оценка 30 суток
+        # Месячное окно: сбрасываем в первый день месяца
         if now - self._month_usage.start_ts >= 30 * 24 * 3600:
             self._month_usage = UsageWindow(start_ts=self._month_start(), count=0)
 
     def _day_start(self) -> float:
-        # Упрощенно: округление до суток
-        return int(time.time() // (24 * 3600)) * (24 * 3600)
+        # Начало текущих суток (00:00)
+        import datetime
+        today = datetime.date.today()
+        return datetime.datetime.combine(today, datetime.time.min).timestamp()
 
     def _month_start(self) -> float:
-        # Упрощенно: 30-дnevный цикл
-        return int(time.time() // (30 * 24 * 3600)) * (30 * 24 * 3600)
+        # Начало текущего месяца (1 число, 00:00)
+        import datetime
+        today = datetime.date.today()
+        first_day = today.replace(day=1)
+        return datetime.datetime.combine(first_day, datetime.time.min).timestamp()
 
 

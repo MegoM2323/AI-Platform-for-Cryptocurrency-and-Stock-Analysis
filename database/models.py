@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS users (
     premium_until TIMESTAMP,
     analyses_count_today INTEGER DEFAULT 0,
     last_analysis_date DATE,
-    additional_analyses INTEGER DEFAULT 0
+    additional_analyses INTEGER DEFAULT 0,
+    token_balance INTEGER DEFAULT 10
 )
 """
 
@@ -24,9 +25,40 @@ CREATE TABLE IF NOT EXISTS analyses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     token_symbol TEXT NOT NULL,
+    analysis_type TEXT NOT NULL,
     analysis_text TEXT NOT NULL,
+    tokens_spent INTEGER NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users (user_id)
+)
+"""
+
+# Таблица транзакций токенов
+CREATE_TOKEN_TRANSACTIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS token_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    amount INTEGER NOT NULL,
+    transaction_type TEXT NOT NULL,
+    description TEXT,
+    balance_before INTEGER NOT NULL,
+    balance_after INTEGER NOT NULL,
+    payment_id TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users (user_id)
+)
+"""
+
+# Таблица пакетов токенов
+CREATE_TOKEN_PACKAGES_TABLE = """
+CREATE TABLE IF NOT EXISTS token_packages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    tokens INTEGER NOT NULL,
+    price_rub REAL NOT NULL,
+    price_usd REAL NOT NULL,
+    is_active INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """
 
@@ -50,8 +82,12 @@ CREATE TABLE IF NOT EXISTS processed_payments (
     user_id INTEGER NOT NULL,
     payment_type TEXT NOT NULL,
     subscription_type TEXT,
-    analyses_added INTEGER NOT NULL,
+    analyses_added INTEGER,
+    tokens_added INTEGER,
     plan_name TEXT NOT NULL,
+    package_name TEXT,
+    amount_paid REAL,
+    currency TEXT,
     processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users (user_id)
 )
@@ -102,7 +138,11 @@ CREATE TABLE IF NOT EXISTS analysis_cache (
 # Индексы для оптимизации
 CREATE_INDICES = [
     "CREATE INDEX IF NOT EXISTS idx_users_premium ON users(is_premium, premium_until)",
+    "CREATE INDEX IF NOT EXISTS idx_users_token_balance ON users(token_balance)",
     "CREATE INDEX IF NOT EXISTS idx_analyses_user ON analyses(user_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_analyses_user_type ON analyses(user_id, analysis_type, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_token_transactions_user ON token_transactions(user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_token_transactions_payment ON token_transactions(payment_id)",
     "CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_processed_payments_user ON processed_payments(user_id, processed_at)",
     # Индексы для новостей и кэша
@@ -115,6 +155,8 @@ CREATE_INDICES = [
 ALL_SCHEMAS = [
     CREATE_USERS_TABLE,
     CREATE_ANALYSES_TABLE,
+    CREATE_TOKEN_TRANSACTIONS_TABLE,
+    CREATE_TOKEN_PACKAGES_TABLE,
     CREATE_SUBSCRIPTIONS_TABLE,
     CREATE_PROCESSED_PAYMENTS_TABLE,
     CREATE_NEWS_ARTICLES_TABLE,

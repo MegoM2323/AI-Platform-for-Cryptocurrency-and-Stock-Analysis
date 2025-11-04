@@ -16,11 +16,38 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [
                 KeyboardButton(text="📊 Анализ токена"),
-                KeyboardButton(text="❓ Помощь")
+                KeyboardButton(text="🚀 Расширенный анализ")
             ],
             [
-                KeyboardButton(text="💎 Подписка"),
+                KeyboardButton(text="❓ Помощь"),
+                KeyboardButton(text="💰 Купить токены")
+            ],
+            [
+                KeyboardButton(text="🛒 Магазин"),
                 KeyboardButton(text="📈 Мой профиль")
+            ]
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выберите действие..."
+    )
+    return keyboard
+
+
+def get_main_keyboard_with_balance(balance: int) -> ReplyKeyboardMarkup:
+    """Главная клавиатура с отображением баланса токенов."""
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="📊 Анализ токена"),
+                KeyboardButton(text="🚀 Расширенный анализ")
+            ],
+            [
+                KeyboardButton(text="❓ Помощь"),
+                KeyboardButton(text="💰 Купить токены")
+            ],
+            [
+                KeyboardButton(text="🛒 Магазин"),
+                KeyboardButton(text=f"💰 Баланс: {balance} ток.")
             ]
         ],
         resize_keyboard=True,
@@ -59,6 +86,32 @@ def get_subscription_keyboard() -> InlineKeyboardMarkup:
         ]
     )
     return keyboard
+def get_shop_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура витрины магазина (подписки и токены)."""
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💎 Тарифы подписки",
+                    callback_data="show_subscriptions"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💰 Пакеты токенов",
+                    callback_data="show_token_store"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 Назад",
+                    callback_data="back_to_subscription_menu"
+                )
+            ],
+        ]
+    )
+    return keyboard
+
 
 
 def get_subscription_plans_keyboard() -> InlineKeyboardMarkup:
@@ -112,16 +165,59 @@ def get_payment_method_keyboard() -> InlineKeyboardMarkup:
                     callback_data="payment_method_yookassa"
                 )
             ],
+            # Для подписок криптоплатеж может быть отключен; оставляем как есть
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data="cancel_subscription"
+                )
+            ]
+        ]
+    )
+    return keyboard
+
+
+def get_token_packages_keyboard(packages: dict) -> InlineKeyboardMarkup:
+    """Клавиатура выбора пакетов токенов с эквивалентом в анализах."""
+    buttons = []
+    for key, pkg in packages.items():
+        name = pkg.get('name', key)
+        tokens = pkg.get('tokens', 0)
+        price_rub = pkg.get('price_rub', 0)
+        eq = pkg.get('analyses_equivalent', '')
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{name} — {tokens} ток. • {price_rub}₽ (≈ {eq})",
+                callback_data=f"tokenpkg_{key}"
+            )
+        ])
+    buttons.append([
+        InlineKeyboardButton(text="🔙 Назад", callback_data="tokens_back")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_token_payment_method_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура выбора способа оплаты для покупки токенов (фиат/крипто)."""
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💳 Банковская карта (ЮКасса)",
+                    callback_data="token_payment_method_yookassa"
+                )
+            ],
+            # Временное отключение криптооплаты (NOWPayments)
             # [
             #     InlineKeyboardButton(
-            #         text="Криптовалюта",
-            #         callback_data="payment_method_crypto"
+            #         text="₿ Криптовалюта (NOWPayments)",
+            #         callback_data="token_payment_method_crypto"
             #     )
             # ],
             [
                 InlineKeyboardButton(
                     text="❌ Отмена",
-                    callback_data="cancel_subscription"
+                    callback_data="token_payment_cancel"
                 )
             ]
         ]

@@ -38,6 +38,15 @@ def init_db():
     asyncio.run(init())
 
 
+def _run_migration_tokens():
+    """Запустить миграцию подписок в токены (c бэкапом и проверками)."""
+    print("🛠 Запуск миграции подписок в токены...")
+    import asyncio
+    from database.migrations import migrate_to_tokens
+
+    asyncio.run(migrate_to_tokens.main())
+
+
 def test_collector():
     """Тестировать сбор данных"""
     print("🧪 Тестирование сбора данных...")
@@ -298,11 +307,12 @@ def show_info():
   💾 Database - SQLite хранилище
 
 Основные команды:
-  python manage.py run         - Запустить бота
-  python manage.py init-db     - Инициализировать БД
-  python manage.py test-data   - Тест сбора данных
-  python manage.py test-ai     - Тест AI анализа
-  python manage.py info        - Эта справка
+  python manage.py run                 - Запустить бота
+  python manage.py init-db             - Инициализировать БД
+  python manage.py migrate-to-tokens   - Миграция подписок в токены
+  python manage.py test-data           - Тест сбора данных
+  python manage.py test-ai             - Тест AI анализа
+  python manage.py info                - Эта справка
 
 Debug команды:
   python manage.py debug-info  - Показать debug информацию
@@ -330,7 +340,7 @@ def main():
     
     parser.add_argument(
         'command',
-        choices=['run', 'init-db', 'test-data', 'test-ai', 'info', 
+        choices=['run', 'init-db', 'migrate-to-tokens', 'test-data', 'test-ai', 'info', 
                 'debug-info', 'debug-test', 'debug-mock'],
         help='Команда для выполнения'
     )
@@ -340,6 +350,7 @@ def main():
     commands = {
         'run': run_bot,
         'init-db': init_db,
+        'migrate-to-tokens': lambda: _run_migration_tokens(),
         'test-data': test_collector,
         'test-ai': test_ai,
         'info': show_info,

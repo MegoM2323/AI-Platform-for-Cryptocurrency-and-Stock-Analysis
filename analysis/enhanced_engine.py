@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any
 
 import pandas as pd
@@ -70,7 +70,13 @@ class EnhancedAnalysisEngine:
 
     async def generate_multi_level_analysis(self, symbol: str) -> MultiLevelAnalysis:
         # Получаем рыночные данные (дневной таймфрейм по умолчанию)
-        df: pd.DataFrame = await self._cc.get_daily_ohlcv(symbol=symbol, days=60)
+        df: pd.DataFrame = self._cc.get_crypto_data(symbol)
+        
+        # Проверяем, что данные получены
+        if df is None or df.empty:
+            # Создаем пустые данные для технического анализа
+            df = pd.DataFrame({'close': [0]})
+        
         technical = await self.analyze_technical(df)
         sentiment = await self.analyze_sentiment(symbol)
 
@@ -93,7 +99,13 @@ class EnhancedAnalysisEngine:
             f" Обязательно отметь, что анализ основан на дневных данных."
         )
 
-        ai_text = await self._ai.analyze_with_custom_prompt(market_data="", custom_prompt=user_prompt)
+        # Выполняем AI-анализ с защитой от ошибок (например, 429 Too Many Requests)
+        import logging
+        try:
+            ai_text = await self._ai.analyze_with_custom_prompt(market_data="", custom_prompt=user_prompt)
+        except Exception as ai_error:
+            logging.getLogger(__name__).warning(f"AI анализ недоступен, продолжаем без него: {ai_error}")
+            ai_text = ""
 
         # Оценим общий балл и риски на основе тренда и тональности (простая эвристика)
         base = 0.0
@@ -111,7 +123,7 @@ class EnhancedAnalysisEngine:
 
         return MultiLevelAnalysis(
             symbol=symbol,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             timeframe='1day',
             technical=technical,
             sentiment=sentiment,
@@ -135,7 +147,8 @@ class EnhancedAnalysisEngine:
             },
             "sentiment": {
                 "overall": {"score": mla.sentiment.overall.score, "label": mla.sentiment.overall.label},
-                "themes": mla.sentiment.key_themes,
+                "key_themes": mla.sentiment.key_themes,
+                "articles": mla.sentiment.articles,
             },
             "overall_score": mla.overall_score,
             "risk_level": mla.risk_level,

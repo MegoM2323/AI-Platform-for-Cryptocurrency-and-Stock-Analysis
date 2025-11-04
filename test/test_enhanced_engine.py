@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import asyncio
 import pandas as pd
 
@@ -22,7 +26,7 @@ class DummyAI(AIAnalyzer):
 class DummyCC(CryptoCollector):
     def __init__(self):
         pass
-    async def get_daily_ohlcv(self, symbol: str, days: int = 60):
+    def get_crypto_data(self, symbol: str):
         return pd.DataFrame({"close": [1, 2, 3, 4, 5]})
 
 
@@ -33,7 +37,7 @@ def test_enhanced_engine_runs():
         crypto_collector=DummyCC(),
         sentiment_analyzer=SentimentAnalyzer(),
     )
-    result = asyncio.get_event_loop().run_until_complete(engine.analyze_crypto_comprehensive("BTC"))
+    result = asyncio.run(engine.analyze_crypto_comprehensive("BTC"))
     assert result["symbol"] == "BTC"
     assert "overall_score" in result
 
