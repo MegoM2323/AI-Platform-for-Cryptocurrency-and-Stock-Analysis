@@ -79,6 +79,12 @@ def get_subscription_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="🚫 Отменить автопродление",
+                    callback_data="unsubscribe"
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="❌ Отмена",
                     callback_data="cancel_subscription"
                 )
@@ -120,26 +126,32 @@ def get_subscription_plans_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🥉 Basic - 299₽",
+                    text="🥉 Basic",
                     callback_data="subscribe_basic"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="🥈 Trader - 899₽",
+                    text="🥈 Trader",
                     callback_data="subscribe_trader"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="🥇 Pro - 1590₽",
+                    text="🥇 Pro",
                     callback_data="subscribe_pro"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="💎 Elite - 2990₽",
+                    text="💎 Elite",
                     callback_data="subscribe_elite"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚫 Отменить автопродление",
+                    callback_data="unsubscribe"
                 )
             ],
             [

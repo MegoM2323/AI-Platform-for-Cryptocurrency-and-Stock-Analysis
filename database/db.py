@@ -26,6 +26,28 @@ class Database:
             for schema in ALL_SCHEMAS:
                 await db.execute(schema)
             await db.commit()
+            # Обновление таблицы subscriptions до новой схемы (добавление недостающих колонок)
+            try:
+                async with db.execute("PRAGMA table_info(subscriptions)") as cursor:
+                    cols = [row[1] for row in await cursor.fetchall()]
+                alter_ops = []
+                if 'tokens_per_month' not in cols:
+                    alter_ops.append("ALTER TABLE subscriptions ADD COLUMN tokens_per_month INTEGER DEFAULT 0")
+                if 'payment_method_id' not in cols:
+                    alter_ops.append("ALTER TABLE subscriptions ADD COLUMN payment_method_id TEXT")
+                if 'next_charge_at' not in cols:
+                    alter_ops.append("ALTER TABLE subscriptions ADD COLUMN next_charge_at TIMESTAMP")
+                if 'status' not in cols:
+                    alter_ops.append("ALTER TABLE subscriptions ADD COLUMN status TEXT DEFAULT 'active'")
+                for sql in alter_ops:
+                    try:
+                        await db.execute(sql)
+                    except Exception:
+                        pass
+                if alter_ops:
+                    await db.commit()
+            except Exception:
+                pass
             await db.close()
 
     # -------------------
@@ -192,58 +214,51 @@ class Database:
     
     async def increment_analysis_count(self, user_id: int):
         """
-        Увеличить счетчик анализов и списать из дополнительных, если месячный лимит исчерпан
+        Увеличить счетчик анализов (для статистики).
+        В токеновой модели лимиты не используются - токены списываются через TokenManager.
         """
         user = await self.get_user(user_id)
         if not user:
             return
         
-        # Получаем количество анализов за текущий месяц
+        # Обновляем счетчик анализов на сегодня (для статистики)
         from datetime import date
-        current_month = date.today().replace(day=1)
+        today = date.today()
         
         async with aiosqlite.connect(self.db_path) as db:
+            # Получаем текущее значение счетчика
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                """SELECT COUNT(*) as count FROM analyses 
-                   WHERE user_id = ? AND DATE(created_at) >= ?""",
-                (user_id, current_month.isoformat())
+                "SELECT analyses_count_today, last_analysis_date FROM users WHERE user_id = ?",
+                (user_id,)
             ) as cursor:
                 row = await cursor.fetchone()
-                monthly_count = row['count'] if row else 0
-        
-        # Определяем лимит пользователя
-        is_premium = user.get('is_premium', 0)
-        
-        # Получаем план подписки для определения лимита
-        subscription_plan = await self.get_user_subscription_plan(user_id)
-        from config import config
-        
-        if subscription_plan == 'free':
-            limit = config.FREE_ANALYSES_PER_MONTH
-        elif subscription_plan == 'basic':
-            limit = config.BASIC_ANALYSES_PER_MONTH
-        elif subscription_plan == 'trader':
-            limit = config.TRADER_ANALYSES_PER_MONTH
-        elif subscription_plan == 'pro':
-            limit = config.PRO_ANALYSES_PER_MONTH
-        elif subscription_plan == 'elite':
-            limit = config.ELITE_ANALYSES_PER_MONTH
-        else:
-            limit = config.FREE_ANALYSES_PER_MONTH
-        
-        # Если превысили месячный лимит, списываем из дополнительных анализов
-        if monthly_count >= limit:
-            additional = user.get('additional_analyses', 0)
-            if additional > 0:
-                async with aiosqlite.connect(self.db_path) as db:
-                    await db.execute(
-                        """UPDATE users 
-                           SET additional_analyses = additional_analyses - 1
-                           WHERE user_id = ?""",
-                        (user_id,)
-                    )
-                    await db.commit()
+                if row:
+                    last_analysis_date = row['last_analysis_date']
+                    if last_analysis_date:
+                        try:
+                            last_date = date.fromisoformat(last_analysis_date)
+                            if last_date != today:
+                                # Новый день - сбрасываем счетчик
+                                count = 1
+                            else:
+                                # Тот же день - увеличиваем счетчик
+                                count = (row['analyses_count_today'] or 0) + 1
+                        except:
+                            count = 1
+                    else:
+                        count = 1
+                else:
+                    count = 1
+            
+            # Обновляем счетчик
+            await db.execute(
+                """UPDATE users 
+                   SET analyses_count_today = ?, last_analysis_date = ?
+                   WHERE user_id = ?""",
+                (count, today.isoformat(), user_id)
+            )
+            await db.commit()
     
     async def reset_daily_analyses(self, user_id: int):
         """Сбросить счетчик анализов на сегодня"""
@@ -306,15 +321,76 @@ class Database:
             )
             await db.commit()
     
-    async def create_subscription(self, user_id: int, subscription_type: str, amount: float):
-        """Создать запись о подписке"""
+    async def create_subscription(self, user_id: int, subscription_type: str, amount: float, tokens_per_month: int = 0,
+                                  payment_method_id: str = None, next_charge_at: Optional[datetime] = None):
+        """Создать/обновить запись о подписке с рекуррентными начислениями токенов."""
+        if next_charge_at is None:
+            from datetime import timedelta
+            next_charge_at = datetime.now() + timedelta(days=30)
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                """INSERT INTO subscriptions (user_id, subscription_type, amount)
-                   VALUES (?, ?, ?)""",
-                (user_id, subscription_type, amount)
+                """
+                INSERT INTO subscriptions (user_id, subscription_type, amount, tokens_per_month, payment_method_id, next_charge_at, status)
+                VALUES (?, ?, ?, ?, ?, ?, 'active')
+                """,
+                (user_id, subscription_type, amount, tokens_per_month, payment_method_id, next_charge_at.isoformat())
             )
             await db.commit()
+
+    async def update_subscription_payment_method(self, user_id: int, payment_method_id: str):
+        """Сохранить идентификатор метода оплаты для рекуррентных списаний."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE subscriptions
+                SET payment_method_id = ?
+                WHERE user_id = ? AND status = 'active'
+                """,
+                (payment_method_id, user_id)
+            )
+            await db.commit()
+
+    async def schedule_next_charge(self, user_id: int, days: int = 30):
+        """Передвинуть дату следующего списания."""
+        from datetime import timedelta
+        next_date = datetime.now() + timedelta(days=days)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE subscriptions
+                SET next_charge_at = ?
+                WHERE user_id = ? AND status = 'active'
+                """,
+                (next_date.isoformat(), user_id)
+            )
+            await db.commit()
+
+    async def get_due_subscriptions(self) -> List[Dict[str, Any]]:
+        """Получить активные подписки, требующие списания (next_charge_at <= now)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT * FROM subscriptions
+                WHERE status = 'active' AND next_charge_at IS NOT NULL AND next_charge_at <= datetime('now')
+                """
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(r) for r in rows]
+
+    async def cancel_subscription(self, user_id: int) -> bool:
+        """Отменить подписку пользователя: отключить автопродление и будущие списания."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                """
+                UPDATE subscriptions
+                SET status = 'cancelled', payment_method_id = NULL, next_charge_at = NULL
+                WHERE user_id = ? AND status = 'active'
+                """,
+                (user_id,)
+            )
+            await db.commit()
+            return (cur.rowcount or 0) > 0
     
     
     async def get_remaining_analyses(self, user_id: int, max_free: int, max_premium: int) -> int:
@@ -469,13 +545,14 @@ class Database:
                 return row is not None
     
     async def mark_payment_processed(
-        self, 
-        payment_id: str, 
+        self,
+        payment_id: str,
         user_id: int, 
         payment_type: str,
         subscription_type: str,
         analyses_added: int,
-        plan_name: str
+        plan_name: str,
+        tokens_added: int = None
     ) -> bool:
         """
         Пометить платеж как обработанный
@@ -485,20 +562,39 @@ class Database:
             user_id: ID пользователя
             payment_type: Тип платежа
             subscription_type: Тип подписки
-            analyses_added: Количество начисленных анализов
+            analyses_added: Количество начисленных анализов (для совместимости)
             plan_name: Название плана
+            tokens_added: Количество начисленных токенов (опционально)
             
         Returns:
             bool: True если успешно
         """
         try:
+            # Если tokens_added не указан, используем analyses_added (для совместимости)
+            if tokens_added is None:
+                tokens_added = analyses_added
+            
             async with aiosqlite.connect(self.db_path) as db:
-                await db.execute(
-                    """INSERT INTO processed_payments 
-                       (payment_id, user_id, payment_type, subscription_type, analyses_added, plan_name)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (payment_id, user_id, payment_type, subscription_type, analyses_added, plan_name)
-                )
+                # Проверяем, есть ли колонка tokens_added
+                db.row_factory = aiosqlite.Row
+                async with db.execute("PRAGMA table_info(processed_payments)") as cursor:
+                    columns = [row['name'] for row in await cursor.fetchall()]
+                    has_tokens_added = 'tokens_added' in columns
+                
+                if has_tokens_added:
+                    await db.execute(
+                        """INSERT INTO processed_payments 
+                           (payment_id, user_id, payment_type, subscription_type, analyses_added, tokens_added, plan_name)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (payment_id, user_id, payment_type, subscription_type, analyses_added, tokens_added, plan_name)
+                    )
+                else:
+                    await db.execute(
+                        """INSERT INTO processed_payments 
+                           (payment_id, user_id, payment_type, subscription_type, analyses_added, plan_name)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (payment_id, user_id, payment_type, subscription_type, analyses_added, plan_name)
+                    )
                 await db.commit()
                 return True
         except Exception as e:

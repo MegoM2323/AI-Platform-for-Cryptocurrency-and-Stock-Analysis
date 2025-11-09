@@ -35,6 +35,8 @@ class PaymentData:
     description: str = ""
     confirmation_url: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    # Идентификатор сохраненного метода оплаты (для рекуррентных списаний)
+    payment_method_id: Optional[str] = None
 
 
 class YooKassaClient:
@@ -90,7 +92,9 @@ class YooKassaClient:
         description: str,
         return_url: str,
         metadata: Optional[Dict[str, Any]] = None,
-        receipt: Optional[Dict[str, Any]] = None
+        receipt: Optional[Dict[str, Any]] = None,
+        save_payment_method: bool = False,
+        payment_method_id: Optional[str] = None
     ) -> PaymentData:
         """
         Создать платеж
@@ -122,6 +126,12 @@ class YooKassaClient:
                 "description": description,
                 "metadata": metadata or {}
             }
+            if save_payment_method:
+                payment_data["save_payment_method"] = True
+                payment_data["payment_method_data"] = {"type": "bank_card", "save": True}
+            if payment_method_id:
+                # Рекуррентное списание без участия плательщика
+                payment_data["payment_method_id"] = payment_method_id
             
             # Добавляем чек если передан
             if receipt:
@@ -156,7 +166,8 @@ class YooKassaClient:
                             currency=result["amount"]["currency"],
                             description=result.get("description", ""),
                             confirmation_url=result.get("confirmation", {}).get("confirmation_url"),
-                            metadata=result.get("metadata", {})
+                            metadata=result.get("metadata", {}),
+                            payment_method_id=(result.get("payment_method", {}) or {}).get("id")
                         )
                         
                         logger.info(f"Платеж создан: {payment.id}, статус: {payment.status.value}")
@@ -219,7 +230,8 @@ class YooKassaClient:
                             currency=result["amount"]["currency"],
                             description=result.get("description", ""),
                             confirmation_url=result.get("confirmation", {}).get("confirmation_url"),
-                            metadata=result.get("metadata", {})
+                            metadata=result.get("metadata", {}),
+                            payment_method_id=(result.get("payment_method", {}) or {}).get("id")
                         )
                         
                         logger.info(f"Получен платеж: {payment.id}, статус: {payment.status.value}")
@@ -373,7 +385,8 @@ class PaymentManager:
                 description=description,
                 return_url=return_url,
                 metadata=metadata,
-                receipt=receipt
+                receipt=receipt,
+                save_payment_method=True
             )
             
             logger.info(f"Создан платеж вычисления подписки: {payment.id}")

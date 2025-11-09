@@ -6,6 +6,7 @@ from typing import Dict
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramBadRequest
 
 from database.db import Database
 from telegram_bot.token_manager import TokenManager
@@ -202,9 +203,21 @@ async def show_transaction_history(message: Message, db: Database):
 async def tokens_back(callback: CallbackQuery):
     """Вернуться к списку пакетов токенов."""
     packages = _get_token_packages()
-    await callback.message.edit_text(
-        "Выберите пакет токенов:",
-        reply_markup=get_token_packages_keyboard(packages),
-    )
+    text = "Выберите пакет токенов:"
+    keyboard = get_token_packages_keyboard(packages)
+    try:
+        # Избегаем ошибки Telegram "message is not modified"
+        if (callback.message.text or "") == text:
+            # Если текст тот же, попробуем обновить только разметку,
+            # а если и она совпадает — игнорируем исключение ниже
+            await callback.message.edit_reply_markup(reply_markup=keyboard)
+        else:
+            await callback.message.edit_text(text, reply_markup=keyboard)
+    except TelegramBadRequest as e:
+        # Игнорируем неизменённые сообщения
+        if "message is not modified" in str(e).lower():
+            pass
+        else:
+            raise
 
 

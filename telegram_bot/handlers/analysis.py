@@ -176,6 +176,16 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
                     f"Проверь правильность символа и попробуй снова.\n"
                     f"Примеры: BTC, ETH, SOL, BNB"
                 )
+            # Возврат токенов при невалидном символе
+            try:
+                await token_manager.add_tokens(
+                    user_id=user_id,
+                    amount=cost,
+                    transaction_type="refund",
+                    description=f"Возврат за невалидный символ {symbol}",
+                )
+            except Exception:
+                pass
             return
         
         # Получаем данные
@@ -191,6 +201,16 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
                 await message.answer(
                     f"❌ Не удалось получить данные для {symbol}"
                 )
+            # Возврат токенов при отсутствии данных
+            try:
+                await token_manager.add_tokens(
+                    user_id=user_id,
+                    amount=cost,
+                    transaction_type="refund",
+                    description=f"Возврат: нет рыночных данных {symbol}",
+                )
+            except Exception:
+                pass
             return
         
         logger.info(f"Данные получены: {data.shape[0]} записей")
@@ -264,44 +284,52 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
             # Выполняем расширенный анализ
             # Информационное сообщение на время выполнения
             temp_msg = await message.answer("🔄 Выполняю расширенный анализ... Это может занять до 30–60 секунд.")
-            analysis_result, pdf_bytes, _, _ = await _run_enhanced(symbol, db)
-            
-            # Требование: отправлять только один месседж — PDF-отчет
-            if pdf_bytes:
-                pdf_caption = f"""
-📊 <b>ПОДРОБНЫЙ PDF-ОТЧЕТ {symbol}</b>
+            analysis_dict, news_articles, market_df = await _run_enhanced(symbol, db)
 
-📈 <b>Основные показатели:</b>
-• Общий скор: {analysis_result.get('overall_score', 0):.2f}/1.0
-• Уровень риска: {analysis_result.get('risk_level', 'N/A')}
-• Рекомендация: {analysis_result.get('recommendation', 'N/A').upper()}
-
-📰 <b>Анализ новостей:</b>
-• Проанализировано статей: {len(analysis_result.get('sentiment', {}).get('articles', []))}
-• Тональность: {analysis_result.get('sentiment', {}).get('overall', {}).get('label', 'N/A')}
-
-📋 <b>Содержание PDF:</b>
-• Executive Summary
-• Технический анализ с таблицами
-• Анализ настроений с новостями
-• Графики и визуализации
-• Ключевые моменты
-• Источники данных
-
-⚠️ <b>Важно:</b> Анализ основан на дневных данных (1d)
-                """
-                # Удаляем временное информационное сообщение
-                try:
-                    await temp_msg.delete()
-                except Exception:
-                    pass
-
-                await message.answer_document(
-                    document=BufferedInputFile(pdf_bytes, filename=f"{symbol}_detailed_analysis.pdf"),
-                    caption=pdf_caption,
-                    parse_mode="HTML"
+            # Формируем и отправляем расширенный отчёт частями в Telegram
+            try:
+                from reports.telegram_report_builder import TelegramReportBuilder
+                builder = TelegramReportBuilder()
+                parts = await builder.build_enhanced_report(
+                    analysis=analysis_dict,
+                    news_articles=news_articles,
+                    market_data=market_df,
                 )
-            
+            except Exception:
+                parts = ["❌ Не удалось сформировать расширенный отчёт. Попробуйте позже."]
+
+            try:
+                await temp_msg.delete()
+            except Exception:
+                pass
+
+            # Отправка частями с защитой: если ничего не отправлено — вернем токены
+            sent_any = False
+            try:
+                for idx, chunk in enumerate(parts, 1):
+                    if idx == len(parts):
+                        await message.answer(chunk, reply_markup=get_main_keyboard(), parse_mode="HTML")
+                    else:
+                        await message.answer(chunk, parse_mode="HTML")
+                    sent_any = True
+            except Exception:
+                if not sent_any:
+                    try:
+                        await token_manager.add_tokens(
+                            user_id=user_id,
+                            amount=cost,
+                            transaction_type="refund",
+                            description=f"Возврат: ошибка отправки расширенного анализа {symbol}",
+                        )
+                    except Exception:
+                        pass
+                await message.answer(
+                    "❌ Ошибка при отправке расширенного отчёта. Попробуй позже.",
+                    reply_markup=get_main_keyboard()
+                )
+                await state.clear()
+                return
+
             # Очищаем состояние
             await state.clear()
             return
@@ -312,6 +340,16 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
             try:
                 if 'temp_msg' in locals() and temp_msg is not None:
                     await temp_msg.delete()
+            except Exception:
+                pass
+            # Возврат токенов при ошибке расширенного анализа
+            try:
+                await token_manager.add_tokens(
+                    user_id=user_id,
+                    amount=cost,
+                    transaction_type="refund",
+                    description=f"Возврат: ошибка расширенного анализа {symbol}",
+                )
             except Exception:
                 pass
             # Сообщаем пользователю об ошибке единым сообщением
@@ -345,6 +383,16 @@ async def process_symbol(message: Message, state: FSMContext, db: Database):
                 "❌ Ошибка при выполнении анализа.\n"
                 "Попробуй позже."
             )
+            # Возврат токенов при пустом результате
+            try:
+                await token_manager.add_tokens(
+                    user_id=user_id,
+                    amount=cost,
+                    transaction_type="refund",
+                    description=f"Возврат: пустой результат AI {symbol}",
+                )
+            except Exception:
+                pass
             return
         
         logger.info(f"AI анализ завершен: {len(analysis_result)} символов")

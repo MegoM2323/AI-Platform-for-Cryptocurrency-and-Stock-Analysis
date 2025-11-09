@@ -70,42 +70,43 @@ class Config:
     PRO_ANALYSES_PER_MONTH = int(os.getenv('PRO_ANALYSES_PER_MONTH', 150))
     ELITE_ANALYSES_PER_MONTH = int(os.getenv('ELITE_ANALYSES_PER_MONTH', 500))
     
-    # Subscription Plans (Monthly) - DEPRECATED: Используются только для миграции и совместимости
+    # Subscription Plans (Monthly, token-based): подписка начисляет токены ежемесячно по выгодной цене
+    # Примечание: тексты UI обновлены под токены; лимиты анализов больше не используются
     SUBSCRIPTION_PLANS = {
         'free': {
             'name': 'Free',
             'days': 30,
             'price': 0,
-            'analyses_per_month': 3,
-            'features': ['3 анализа в месяц', 'Базовый анализ']
+            'tokens_per_month': 0,
+            'features': ['Доступ к базовым функциям']
         },
         'basic': {
             'name': 'Basic',
             'days': 30,
-            'price': 299,
-            'analyses_per_month': 15,
-            'features': ['15 анализов в месяц', 'Базовый анализ']
+            'price': 249,  # немного выгоднее, чем покупать 50 токенов отдельно
+            'tokens_per_month': 50,
+            'features': ['50 токенов/мес', 'Выгодная цена', 'Подходит для периодического использования']
         },
         'trader': {
             'name': 'Trader',
             'days': 30,
-            'price': 899,
-            'analyses_per_month': 50,
-            'features': ['50 анализов в месяц', 'Расширенный анализ']
+            'price': 799,
+            'tokens_per_month': 200,
+            'features': ['200 токенов/мес', 'Оптимально для активной торговли']
         },
         'pro': {
             'name': 'Pro',
             'days': 30,
-            'price': 1,
-            'analyses_per_month': 150,
-            'features': ['150 анализов в месяц', 'Полный анализ', 'Приоритетная скорость']
+            'price': 1490,
+            'tokens_per_month': 500,
+            'features': ['500 токенов/мес', 'Приоритетная скорость']
         },
         'elite': {
             'name': 'Elite',
             'days': 30,
-            'price': 2990,
-            'analyses_per_month': 500,
-            'features': ['500 анализов в месяц', 'Полный анализ', 'Приоритетная скорость', "Ранний доступ к функциям"]
+            'price': 2790,
+            'tokens_per_month': 1500,
+            'features': ['1500 токенов/мес', 'Максимальная выгода', 'Приоритетная скорость', 'Ранний доступ к функциям']
         }
     }
     

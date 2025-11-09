@@ -62,14 +62,17 @@ CREATE TABLE IF NOT EXISTS token_packages (
 )
 """
 
-# Таблица подписок (платежи)
+# Таблица подписок (рекуррентные начисления токенов)
 CREATE_SUBSCRIPTIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS subscriptions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     subscription_type TEXT NOT NULL,
     amount REAL NOT NULL,
-    status TEXT DEFAULT 'pending',
+    tokens_per_month INTEGER DEFAULT 0,
+    payment_method_id TEXT,
+    next_charge_at TIMESTAMP,
+    status TEXT DEFAULT 'active',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users (user_id)
 )

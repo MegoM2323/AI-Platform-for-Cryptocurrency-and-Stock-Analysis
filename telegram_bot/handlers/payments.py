@@ -206,13 +206,27 @@ async def handle_successful_payment(payment_id: str, user_id: int, payment, db: 
             subscription_type = metadata.get("subscription_type", "basic")
             
             # Обрабатываем успешный платеж
-            success, plan_name, monthly_limit = await process_successful_payment(
+            success, plan_name, credited_tokens = await process_successful_payment(
                 payment_id, payment_type, user_id, db, subscription_type
             )
             
             if success:
+                # Пытаемся сохранить payment_method_id, если мониторинг сработал раньше вебхука
+                try:
+                    yk_payment = await payment_manager.check_payment_status(payment_id)
+                    pm_id = getattr(yk_payment, 'payment_method_id', None) if yk_payment else None
+                    md = getattr(yk_payment, 'metadata', {}) if yk_payment else {}
+                    is_renewal = bool(md.get('renewal'))
+                    # Сохраняем карту только на первом платеже (renewal == False)
+                    if pm_id and not is_renewal:
+                        try:
+                            await db.update_subscription_payment_method(user_id, pm_id)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
                 # Уведомляем пользователя только если мы успешно обработали платеж
-                await notify_user_about_payment_success(user_id, payment_id, plan_name, monthly_limit, bot, db)
+                await notify_user_about_tokens(user_id, payment_id, plan_name, credited_tokens, bot, db)
                 
                 # Удаляем из активных проверок
                 if payment_id in active_payment_checks:
@@ -267,13 +281,13 @@ async def handle_successful_crypto_payment(payment_id: str, user_id: int, paymen
             subscription_type = metadata.get("subscription_type", "basic")
             
             # Обрабатываем успешный криптоплатеж
-            success, plan_name, monthly_limit = await process_successful_payment(
+            success, plan_name, credited_tokens = await process_successful_payment(
                 payment_id, payment_type, user_id, db, subscription_type
             )
             
             if success:
                 # Уведомляем пользователя только если мы успешно обработали платеж
-                await notify_user_about_payment_success(user_id, payment_id, plan_name, monthly_limit, bot, db)
+                await notify_user_about_tokens(user_id, payment_id, plan_name, credited_tokens, bot, db)
                 
                 # Удаляем из активных проверок
                 if payment_id in active_payment_checks:
@@ -349,7 +363,7 @@ async def handle_payment_timeout(payment_id: str, user_id: int, bot):
 
 
 async def process_successful_payment(payment_id: str, payment_type: str, user_id: int, db: Database, subscription_type: str = None):
-    """Обработать успешный платеж: подписка или покупка токенов"""
+    """Обработать успешный платеж: подписка (начислить токены) или покупка токенов."""
     try:
         # ✅ ПРОВЕРКА 1: Проверяем в базе данных, не был ли уже обработан этот платёж
         is_processed = await db.is_payment_processed(payment_id)
@@ -384,9 +398,10 @@ async def process_successful_payment(payment_id: str, payment_type: str, user_id
                         else:
                             subscription_type = 'basic'  # По умолчанию
             
-            # Получаем план подписки
+            # Получаем план подписки (токеновая модель)
             plan = config.SUBSCRIPTION_PLANS.get(subscription_type, config.SUBSCRIPTION_PLANS['basic'])
             days = plan['days']
+            tokens_per_month = int(plan.get('tokens_per_month', 0) or 0)
             
             logger.info(f"🔄 Начинаем обработку платежа {payment_id}: пользователь {user_id}, план {subscription_type}")
             
@@ -395,25 +410,38 @@ async def process_successful_payment(payment_id: str, payment_type: str, user_id
             is_premium = user_data.get('is_premium', 0)
             premium_until = user_data.get('premium_until')
             
-            # Активируем/перезаписываем подписку (это просто перезапишет дату истечения)
+            # Активируем премиум и создаем/обновляем подписку под токены
             await db.grant_premium(user_id, days=days)
             logger.info(f"✨ Подписка {subscription_type} активирована для пользователя {user_id}")
             
             # ✅ КРИТИЧЕСКИ ВАЖНО: СНАЧАЛА помечаем платеж как обработанный В БАЗЕ ДАННЫХ
             # Это должно быть ДО создания подписки для предотвращения дублирования!
             
-            # При каждой покупке подписки начисляем 0 дополнительных анализов
-            # Подписка дает только месячный лимит согласно тарифу
-            analyses_added = 0
-            analyses_per_month = plan['analyses_per_month']
+            # В новой модели подписка начисляет токены, а не лимиты анализов
+            # Сначала начисляем токены, чтобы знать их количество для сохранения
+            credited_tokens = 0
+            try:
+                if tokens_per_month > 0:
+                    tm = TokenManager(db)
+                    added = await tm.add_tokens(
+                        user_id=user_id,
+                        amount=tokens_per_month,
+                        transaction_type='subscription',
+                        description=f"Подписка {plan['name']} — ежемесячные токены",
+                        payment_id=payment_id,
+                    )
+                    credited_tokens = tokens_per_month if added else 0
+            except Exception as e:
+                logger.error(f"Ошибка начисления токенов по подписке: {e}")
             
             payment_marked = await db.mark_payment_processed(
                 payment_id=payment_id,
                 user_id=user_id,
                 payment_type=payment_type,
                 subscription_type=subscription_type,
-                analyses_added=analyses_added,
-                plan_name=plan['name']
+                analyses_added=credited_tokens,  # Для совместимости
+                plan_name=plan['name'],
+                tokens_added=credited_tokens  # Сохраняем токены в tokens_added
             )
             
             if not payment_marked:
@@ -428,26 +456,19 @@ async def process_successful_payment(payment_id: str, payment_type: str, user_id
             
             logger.info(f"🔒 Платеж {payment_id} помечен как обработанный в базе данных (атомарная операция)")
             
-            # Создаем запись о подписке
-            await db.create_subscription(user_id, subscription_type, plan['price'])
-            logger.info(f"📝 Создана запись о подписке {subscription_type} для пользователя {user_id}")
-            
-            # Получаем месячный лимит анализов для тарифа
-            monthly_limit = plan['analyses_per_month']
-            
-            logger.info(f"✅ Подписка {subscription_type} активирована для пользователя {user_id}")
-            logger.info(f"📊 Доступно {monthly_limit} анализов в месяц согласно тарифу {subscription_type}")
-            
+            # Создаем/обновляем запись о подписке c рекуррентом (без payment_method_id на этом этапе)
+            await db.create_subscription(user_id, subscription_type, plan['price'], tokens_per_month=tokens_per_month)
+            logger.info(f"📝 Запись о подписке {subscription_type} создана/обновлена для пользователя {user_id}")
+
             # Сохраняем информацию об обработке платежа в памяти
-            result = (True, plan['name'], monthly_limit)  # Возвращаем месячный лимит для информирования
+            result = (True, plan['name'], credited_tokens)
             processed_payments[payment_id] = result
             
             # Логируем информацию о повторной покупке
             if is_premium and premium_until:
                 logger.info(f"🎯 Информация о подписке:")
                 logger.info(f"   📅 Период: {days} дней")
-                logger.info(f"   📊 Месячный лимит: {monthly_limit} анализов")
-                logger.info(f"   💎 Добавлено в резерв: {analyses_added} анализов")
+                logger.info(f"   💰 Токенов в месяц: {tokens_per_month}")
             
             return result
         elif payment_type == "token_purchase":
@@ -472,8 +493,9 @@ async def process_successful_payment(payment_id: str, payment_type: str, user_id
                 user_id=user_id,
                 payment_type=payment_type,
                 subscription_type=None,
-                analyses_added=tokens,  # используем поле как количество токенов
+                analyses_added=tokens,  # Для совместимости
                 plan_name=package_name,
+                tokens_added=tokens  # Сохраняем токены в tokens_added
             )
 
             if not payment_marked:
@@ -511,33 +533,33 @@ async def process_successful_payment(payment_id: str, payment_type: str, user_id
         return False, None, 0
 
 
-async def notify_user_about_payment_success(user_id: int, payment_id: str, plan_name: str, monthly_limit: int, bot, db: Database = None):
+async def notify_user_about_payment_success(user_id: int, payment_id: str, plan_name: str, credited_tokens: int, bot, db: Database = None):
     """Уведомить пользователя об успешной оплате"""
     try:
         logger.info(f"📧 Отправка уведомления пользователю {user_id} о платеже {payment_id}")
         
-        # Получаем информацию о пользователе
+        # Получаем информацию о пользователе и балансе токенов
         if db:
             user_data = await db.get_user(user_id)
-            additional_analyses = user_data.get('additional_analyses', 0) if user_data else 0
+            tm = TokenManager(db)
+            current_balance = await tm.get_balance(user_id)
         else:
-            additional_analyses = 0
+            current_balance = 0
         
         success_text = f"""
 ✅ <b>Платеж успешно обработан!</b>
 
 💎 <b>Подписка {plan_name} активирована!</b>
 
-📊 <b>Доступно анализов в месяц:</b> {monthly_limit}
-{f'💰 Дополнительные анализы на счету: <b>{additional_analyses}</b>' if additional_analyses > 0 else ''}
+💰 <b>Начислено токенов:</b> {credited_tokens}
+💳 <b>Текущий баланс:</b> {current_balance} ток.
 
 <b>ID платежа:</b> <code>{payment_id}</code>
 
 💡 <b>Информация:</b>
-• Месячный лимит обновляется каждый месяц
-• Дополнительные анализы можно купить отдельно
-
-Теперь вы можете использовать анализы для исследования криптовалют!
+• Токены начисляются автоматически каждый месяц
+• Вы можете использовать токены для проведения анализов
+• Токены не сгорают и накапливаются на вашем счете
         """
         
         await bot.send_message(
@@ -576,6 +598,73 @@ async def notify_user_about_tokens(user_id: int, payment_id: str, package_name: 
         logger.error(f"Ошибка уведомления о токенах: {e}")
 
 
+# Фоновый воркер: рекуррентные списания подписок и начисление токенов
+async def _recurring_billing_worker(db: Database, bot):
+    from config import config
+    while True:
+        try:
+            due = await db.get_due_subscriptions()
+            for sub in due:
+                user_id = sub['user_id']
+                plan_id = sub['subscription_type']
+                payment_method_id = sub.get('payment_method_id')
+                plan = config.SUBSCRIPTION_PLANS.get(plan_id, config.SUBSCRIPTION_PLANS['basic'])
+                amount = float(plan['price'])
+                metadata = {
+                    "user_id": str(user_id),
+                    "subscription_type": plan_id,
+                    "payment_type": "subscription",
+                    "renewal": True,
+                }
+                try:
+                    if not payment_manager.yookassa or not payment_method_id:
+                        # Нет возможности автосписания — перенесем на сутки и уведомим пользователя
+                        await db.schedule_next_charge(user_id, days=1)
+                        try:
+                            await bot.send_message(user_id, (
+                                "⚠️ Автосписание подписки не выполнено: не сохранен способ оплаты.\n"
+                                "Пожалуйста, переоформите подписку, чтобы включить автосписания."
+                            ))
+                        except Exception:
+                            pass
+                        continue
+                    # Рекуррентное списание через сохраненный метод оплаты
+                    payment = await payment_manager.yookassa.create_payment(
+                        amount=amount,
+                        description=f"Подписка {plan.get('name')} — продление",
+                        return_url=f"https://t.me/{getattr(config, 'TELEGRAM_BOT_USERNAME', '')}?start=payment_success",
+                        metadata=metadata,
+                        receipt=None,
+                        save_payment_method=False,
+                        payment_method_id=payment_method_id,
+                    )
+                    if payment and payment_manager.is_payment_successful(payment):
+                        success, plan_name, credited_tokens = await process_successful_payment(
+                            payment.id, "subscription", user_id, db, plan_id
+                        )
+                        if success:
+                            try:
+                                await db.schedule_next_charge(user_id, days=plan.get('days', 30))
+                            except Exception:
+                                pass
+                            try:
+                                await notify_user_about_tokens(user_id, payment.id, plan_name, credited_tokens, bot, db)
+                            except Exception:
+                                pass
+                    else:
+                        # Переносим следующий чардж на сутки
+                        await db.schedule_next_charge(user_id, days=1)
+                except Exception as e:
+                    logger.error(f"Recurring billing error for user {user_id}: {e}")
+                    try:
+                        await db.schedule_next_charge(user_id, days=1)
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.error(f"Recurring billing loop error: {e}")
+        # Спим 1 час между проходами
+        await asyncio.sleep(3600)
+
 # Webhook обработчики для автоматической обработки платежей
 async def yookassa_webhook_handler(request):
     """Обработчик webhook от ЮКасса"""
@@ -599,6 +688,8 @@ async def yookassa_webhook_handler(request):
                 if user_id and payment_type == "subscription":
                     # Получаем тип подписки из метаданных
                     subscription_type = metadata.get('subscription_type', 'basic')
+                    payment_method_id = (data.get('object', {}) or {}).get('payment_method', {}) or {}
+                    payment_method_id = payment_method_id.get('id')
                     
                     # Инициализируем Database для обработки платежа
                     from database import Database
@@ -606,16 +697,21 @@ async def yookassa_webhook_handler(request):
                     db = Database(config.DATABASE_PATH)
                     
                     # Обрабатываем успешный платеж
-                    success, plan_name, monthly_limit = await process_successful_payment(
+                    success, plan_name, credited_tokens = await process_successful_payment(
                         payment_id, payment_type, user_id, 
                         db,
                         subscription_type
                     )
                     
                     if success:
+                        try:
+                            if payment_method_id:
+                                await db.update_subscription_payment_method(user_id, payment_method_id)
+                        except Exception:
+                            pass
                         # Получаем экземпляр бота для уведомления
                         from telegram_bot.bot import bot
-                        await notify_user_about_payment_success(user_id, payment_id, plan_name, monthly_limit, bot, db)
+                        await notify_user_about_tokens(user_id, payment_id, plan_name, credited_tokens, bot, db)
                         logger.info(f"Платеж {payment_id} успешно обработан для пользователя {user_id}")
                     else:
                         logger.error(f"Не удалось обработать платеж {payment_id} для пользователя {user_id}")
@@ -676,7 +772,7 @@ async def nowpayments_webhook_handler(request):
                 db = Database(config.DATABASE_PATH)
                 
                 # Обрабатываем успешный криптоплатеж
-                success, plan_name, monthly_limit = await process_successful_payment(
+                success, plan_name, credited_tokens = await process_successful_payment(
                     payment.payment_id, payment_type, user_id,
                     db,
                     subscription_type
@@ -685,7 +781,7 @@ async def nowpayments_webhook_handler(request):
                 if success:
                     # Получаем экземпляр бота для уведомления
                     from telegram_bot.bot import bot
-                    await notify_user_about_payment_success(user_id, payment.payment_id, plan_name, monthly_limit, bot, db)
+                    await notify_user_about_payment_success(user_id, payment.payment_id, plan_name, credited_tokens, bot, db)
                     logger.info(f"Криптоплатеж {payment.payment_id} успешно обработан для пользователя {user_id}")
                 else:
                     logger.error(f"Не удалось обработать криптоплатеж {payment.payment_id} для пользователя {user_id}")
@@ -720,82 +816,42 @@ async def show_subscription_options(message: Message, state: FSMContext, db: Dat
     
     user_id = message.from_user.id
     user_data = await db.get_user(user_id)
-    
-    # Получаем информацию о подписке
-    subscription_plan = await db.get_user_subscription_plan(user_id)
     is_premium = user_data.get('is_premium', 0)
     premium_until = user_data.get('premium_until')
-    additional_analyses = await db.get_additional_analyses(user_id)
-    
-    # Получаем оставшиеся анализы
-    from datetime import date
-    current_month = date.today().replace(day=1)
-    monthly_analyses = await db.get_monthly_analyses_count(user_id, current_month)
-    
-    # Определяем лимиты и название плана
-    if subscription_plan == 'free':
-        limit = config.FREE_ANALYSES_PER_MONTH
-        plan_name = "Free"
-    elif subscription_plan == 'basic':
-        plan_name = "Basic"
-        limit = config.BASIC_ANALYSES_PER_MONTH
-    elif subscription_plan == 'trader':
-        plan_name = "Trader"
-        limit = config.TRADER_ANALYSES_PER_MONTH
-    elif subscription_plan == 'pro':
-        plan_name = "Pro"
-        limit = config.PRO_ANALYSES_PER_MONTH
-    elif subscription_plan == 'elite':
-        plan_name = "Elite"
-        limit = config.ELITE_ANALYSES_PER_MONTH
-    elif subscription_plan == 'premium':
-        # Для общего премиум статуса определяем по дополнительным анализам
-        if additional_analyses >= 500:
-            plan_name = "Elite"
-            limit = config.ELITE_ANALYSES_PER_MONTH
-        elif additional_analyses >= 150:
-            plan_name = "Pro"
-            limit = config.PRO_ANALYSES_PER_MONTH
-        elif additional_analyses >= 50:
-            plan_name = "Trader"
-            limit = config.TRADER_ANALYSES_PER_MONTH
-        else:
-            plan_name = "Basic"
-            limit = config.BASIC_ANALYSES_PER_MONTH
-    else:
-        plan_name = "Free"
-        limit = config.FREE_ANALYSES_PER_MONTH
-    
-    remaining_analyses = max(0, limit - monthly_analyses + additional_analyses)
-    
-    # Определяем текущий статус
+    plan_key = await db.get_user_subscription_plan(user_id)
+    plan_cfg = config.SUBSCRIPTION_PLANS.get(plan_key, config.SUBSCRIPTION_PLANS['free'])
+    plan_name = plan_cfg['name']
+    # Текущий баланс токенов
+    tm = TokenManager(db)
+    balance = await tm.get_balance(user_id)
+    # Статус
     if is_premium and premium_until:
         from datetime import datetime
         try:
             premium_until_dt = datetime.fromisoformat(premium_until.replace('Z', '+00:00'))
             if premium_until_dt > datetime.now():
-                status_text = f"✅ {plan_name} активна до {premium_until_dt.strftime('%d.%m.%Y')}\nОсталось анализов: {remaining_analyses}"
+                status_text = f"✅ {plan_name} активна до {premium_until_dt.strftime('%d.%m.%Y')}\nБаланс: {balance} ток."
             else:
-                status_text = "❌ Подписка истекла"
+                status_text = f"❌ Подписка истекла\nБаланс: {balance} ток."
         except:
-            status_text = f"✅ {plan_name} активна\nОсталось анализов: {remaining_analyses}"
+            status_text = f"✅ {plan_name} активна\nБаланс: {balance} ток."
     else:
-        status_text = f"❌ Бесплатный тариф\nОсталось анализов: {remaining_analyses}"
+        status_text = f"❌ Бесплатный тариф\nБаланс: {balance} ток."
     
     subscription_text = f"""
-💎 <b>ТАРИФНЫЕ ПЛАНЫ</b>
+💎 <b>ТАРИФЫ (ТОКЕНЫ В МЕСЯЦ)</b>
 
 <b>Текущий статус:</b> {status_text}
 
 <b>🆓 Free:</b>
-• 3 анализа в месяц
-• Базовый анализ
+• 0₽/мес
+• Базовые функции
 
 <b>💎 Доступные тарифы:</b>
-• 🥉 Basic - 299₽/мес (15 анализов)
-• 🥈 Trader - 899₽/мес (50 анализов)
-• 🥇 Pro - 1590₽/мес (150 анализов)
-• 💎 Elite - 2990₽/мес (500 анализов)
+• 🥉 Basic — {config.SUBSCRIPTION_PLANS['basic']['price']}₽/мес — {config.SUBSCRIPTION_PLANS['basic']['tokens_per_month']} ток./мес
+• 🥈 Trader — {config.SUBSCRIPTION_PLANS['trader']['price']}₽/мес — {config.SUBSCRIPTION_PLANS['trader']['tokens_per_month']} ток./мес
+• 🥇 Pro — {config.SUBSCRIPTION_PLANS['pro']['price']}₽/мес — {config.SUBSCRIPTION_PLANS['pro']['tokens_per_month']} ток./мес
+• 💎 Elite — {config.SUBSCRIPTION_PLANS['elite']['price']}₽/мес — {config.SUBSCRIPTION_PLANS['elite']['tokens_per_month']} ток./мес
 
 
 Выберите подходящий тариф:
@@ -828,34 +884,37 @@ async def show_subscription_plans(callback: CallbackQuery):
     await callback.answer()
     
     plans_text = """
-💎 <b>ТАРИФНЫЕ ПЛАНЫ</b>
+💎 <b>ТАРИФЫ (ТОКЕНЫ В МЕСЯЦ)</b>
 
 <b>🆓 Free - 0₽/мес</b>
-• 3 анализа в месяц
-• Базовый анализ
+• Доступ к базовым функциям
 
-<b>🥉 Basic - 299₽/мес</b>
-• 15 анализов в месяц
-• Базовый анализ
+<b>🥉 Basic - {b_price}₽/мес</b>
+• 50 токенов/мес
+• Выгоднее, чем покупать токены отдельно
 
-<b>🥈 Trader - 899₽/мес</b>
-• 50 анализов в месяц
-• Расширенный анализ
+<b>🥈 Trader - {t_price}₽/мес</b>
+• 200 токенов/мес
+• Оптимально для активной торговли
 
-<b>🥇 Pro - 1590₽/мес</b>
-• 150 анализов в месяц
-• Полный анализ
+<b>🥇 Pro - {p_price}₽/мес</b>
+• 500 токенов/мес
 • Приоритетная скорость
 
-<b>💎 Elite - 2990₽/мес</b>
-• 500 анализов в месяц
-• Полный анализ
+<b>💎 Elite - {e_price}₽/мес</b>
+• 1500 токенов/мес
+• Максимальная выгода
 • Приоритетная скорость
 • Ранний доступ к новым функциям
 
 
 Выберите тариф:
-    """
+    """.format(
+        b_price=config.SUBSCRIPTION_PLANS['basic']['price'],
+        t_price=config.SUBSCRIPTION_PLANS['trader']['price'],
+        p_price=config.SUBSCRIPTION_PLANS['pro']['price'],
+        e_price=config.SUBSCRIPTION_PLANS['elite']['price'],
+    )
     
     await callback.message.edit_text(
         plans_text,
@@ -915,10 +974,17 @@ async def process_basic_subscription(callback: CallbackQuery, db: Database, stat
 🥉 <b>{plan['name']}</b>
 
 <b>Стоимость:</b> {plan['price']}₽/мес
+<b>Начисление:</b> {plan['tokens_per_month']} токенов каждый месяц
 
-<b>Что входит:</b>
+<b>Преимущества:</b>
 {chr(10).join([f"✅ {feature}" for feature in plan['features']])}
 
+
+ℹ️ После успешного первого платежа дальнейшая оплата подписки будет выполняться автоматически каждый месяц.
+Автопродление можно отключить в разделе «Подписка» кнопкой «Отменить автопродление».
+
+ℹ️ После успешного первого платежа дальнейшая оплата подписки будет выполняться автоматически каждый месяц.
+Автопродление можно отключить в разделе «Подписка» кнопкой «Отменить автопродление».
 
 Выберите способ оплаты:
     """
@@ -950,10 +1016,14 @@ async def process_trader_subscription(callback: CallbackQuery, db: Database, sta
 🥈 <b>{plan['name']}</b>
 
 <b>Стоимость:</b> {plan['price']}₽/мес
+<b>Начисление:</b> {plan['tokens_per_month']} токенов каждый месяц
 
-<b>Что входит:</b>
+<b>Преимущества:</b>
 {chr(10).join([f"✅ {feature}" for feature in plan['features']])}
 
+
+ℹ️ После успешного первого платежа дальнейшая оплата подписки будет выполняться автоматически каждый месяц.
+Автопродление можно отключить в разделе «Подписка» кнопкой «Отменить автопродление».
 
 Выберите способ оплаты:
     """
@@ -985,10 +1055,14 @@ async def process_pro_subscription(callback: CallbackQuery, db: Database, state:
 🥇 <b>{plan['name']}</b>
 
 <b>Стоимость:</b> {plan['price']}₽/мес
+<b>Начисление:</b> {plan['tokens_per_month']} токенов каждый месяц
 
-<b>Что входит:</b>
+<b>Преимущества:</b>
 {chr(10).join([f"✅ {feature}" for feature in plan['features']])}
 
+
+ℹ️ После успешного первого платежа дальнейшая оплата подписки будет выполняться автоматически каждый месяц.
+Автопродление можно отключить в разделе «Подписка» кнопкой «Отменить автопродление».
 
 Выберите способ оплаты:
     """
@@ -1020,10 +1094,14 @@ async def process_elite_subscription(callback: CallbackQuery, db: Database, stat
 💎 <b>{plan['name']}</b>
 
 <b>Стоимость:</b> {plan['price']}₽/мес
+<b>Начисление:</b> {plan['tokens_per_month']} токенов каждый месяц
 
-<b>Что входит:</b>
+<b>Преимущества:</b>
 {chr(10).join([f"✅ {feature}" for feature in plan['features']])}
 
+
+ℹ️ После успешного первого платежа дальнейшая оплата подписки будет выполняться автоматически каждый месяц.
+Автопродление можно отключить в разделе «Подписка» кнопкой «Отменить автопродление».
 
 Выберите способ оплаты:
     """
@@ -1104,17 +1182,18 @@ async def check_payment_status(callback: CallbackQuery, db: Database):
                     subscription_type = processed_info['subscription_type']
                     plan = config.SUBSCRIPTION_PLANS.get(subscription_type, config.SUBSCRIPTION_PLANS['basic'])
                     
-                    # Получаем актуальное количество дополнительных анализов
-                    updated_user_data = await db.get_user(user_id)
-                    additional_analyses = updated_user_data.get('additional_analyses', 0)
+                    # Получаем актуальный баланс токенов
+                    tm = TokenManager(db)
+                    current_balance = await tm.get_balance(user_id)
+                    credited_tokens = processed_info.get('tokens_added', 0) or processed_info.get('analyses_added', 0)
                     
                     success_text = f"""
 ✅ <b>Платеж уже был обработан ранее</b>
 
 💎 <b>Подписка {processed_info['plan_name']} активирована</b>
 
-📊 <b>Месячный лимит:</b> {plan['analyses_per_month']} анализов
-{f'💰 Дополнительные анализы: <b>{additional_analyses}</b>' if additional_analyses > 0 else ''}
+💰 <b>Начислено токенов:</b> {credited_tokens}
+💳 <b>Текущий баланс:</b> {current_balance} ток.
 
 <b>ID платежа:</b> <code>{payment.id}</code>
 
@@ -1146,14 +1225,27 @@ async def check_payment_status(callback: CallbackQuery, db: Database):
                 subscription_type = metadata.get("subscription_type", "basic")
                 
                 # Используем единую функцию обработки платежа
-                success, plan_name, monthly_limit = await process_successful_payment(
+                success, plan_name, credited_tokens = await process_successful_payment(
                     payment_id, payment_type, user_id, db, subscription_type
                 )
                 
                 if success:
-                    # Получаем количество дополнительных анализов
-                    updated_user_data = await db.get_user(user_id)
-                    additional_analyses = updated_user_data.get('additional_analyses', 0)
+                    # Сохранить payment_method_id, если он доступен в платеже
+                    try:
+                        yk_payment = await payment_manager.check_payment_status(payment_id)
+                        pm_id = getattr(yk_payment, 'payment_method_id', None) if yk_payment else None
+                        md = getattr(yk_payment, 'metadata', {}) if yk_payment else {}
+                        is_renewal = bool(md.get('renewal'))
+                        if pm_id and not is_renewal:
+                            try:
+                                await db.update_subscription_payment_method(user_id, pm_id)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    # Получаем актуальный баланс токенов
+                    tm = TokenManager(db)
+                    current_balance = await tm.get_balance(user_id)
                     
                     # Получаем информацию о плане для отображения
                     plan = config.SUBSCRIPTION_PLANS.get(subscription_type, config.SUBSCRIPTION_PLANS['basic'])
@@ -1163,8 +1255,8 @@ async def check_payment_status(callback: CallbackQuery, db: Database):
 
 💎 <b>Подписка {plan_name} активирована!</b>
 
-📊 <b>Месячный лимит:</b> {monthly_limit} анализов
-{f'💰 Дополнительные анализы: <b>{additional_analyses}</b>' if additional_analyses > 0 else ''}
+💰 <b>Начислено токенов:</b> {credited_tokens}
+💳 <b>Текущий баланс:</b> {current_balance} ток.
 
 <b>Что входит:</b>
 {chr(10).join([f"• {feature}" for feature in plan['features']])}
@@ -1172,8 +1264,9 @@ async def check_payment_status(callback: CallbackQuery, db: Database):
 <b>ID платежа:</b> <code>{payment.id}</code>
 
 💡 <b>Информация:</b>
-• Месячный лимит обновляется каждый месяц
-• Дополнительные анализы можно купить отдельно
+• Токены начисляются автоматически каждый месяц
+• Вы можете использовать токены для проведения анализов
+• Токены не сгорают и накапливаются на вашем счете
                     """
                     
                     logger.info(f"Платеж {payment_id} успешно обработан для пользователя {user_id}")
@@ -1346,6 +1439,7 @@ async def process_yookassa_payment(callback: CallbackQuery, db: Database, state:
 💎 <b>{plan_name}</b>
 
 <b>Стоимость:</b> {amount}₽/мес
+<b>Начисление:</b> {plan.get('tokens_per_month', 0)} токенов каждый месяц
 <b>Способ оплаты:</b> 💳 Банковская карта
 
 <b>Что входит:</b>
@@ -1353,6 +1447,10 @@ async def process_yookassa_payment(callback: CallbackQuery, db: Database, state:
 
 <b>Статус платежа:</b> {payment.status.value}
 <b>ID платежа:</b> <code>{payment.id}</code>
+
+ℹ️ <b>Важно:</b>
+• После успешного первого платежа подписка будет продлеваться автоматически каждый месяц.
+• Вы всегда можете отключить автопродление в разделе «Подписка» кнопкой «Отменить автопродление».
 
 🔄 <b>Автоматическая проверка активна</b>
 Система автоматически проверит оплату в течение 10 минут.
@@ -1470,14 +1568,27 @@ async def manual_check_payment(callback: CallbackQuery, db: Database):
                 subscription_type = metadata.get("subscription_type", "basic")
                 
                 # Используем единую функцию обработки платежа
-                success, plan_name, monthly_limit = await process_successful_payment(
+                success, plan_name, credited_tokens = await process_successful_payment(
                     payment_id, payment_type, user_id, db, subscription_type
                 )
                 
                 if success:
-                    # Получаем количество дополнительных анализов
-                    updated_user_data = await db.get_user(user_id)
-                    additional_analyses = updated_user_data.get('additional_analyses', 0)
+                    # Сохранить payment_method_id, если он доступен в платеже
+                    try:
+                        yk_payment = await payment_manager.check_payment_status(payment_id)
+                        pm_id = getattr(yk_payment, 'payment_method_id', None) if yk_payment else None
+                        md = getattr(yk_payment, 'metadata', {}) if yk_payment else {}
+                        is_renewal = bool(md.get('renewal'))
+                        if pm_id and not is_renewal:
+                            try:
+                                await db.update_subscription_payment_method(user_id, pm_id)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    # Получаем актуальный баланс токенов
+                    tm = TokenManager(db)
+                    current_balance = await tm.get_balance(user_id)
                     
                     # Получаем информацию о плане для отображения
                     plan = config.SUBSCRIPTION_PLANS.get(subscription_type, config.SUBSCRIPTION_PLANS['basic'])
@@ -1487,8 +1598,8 @@ async def manual_check_payment(callback: CallbackQuery, db: Database):
 
 💎 <b>Подписка {plan_name} активирована!</b>
 
-📊 <b>Месячный лимит:</b> {monthly_limit} анализов
-{f'💰 Дополнительные анализы: <b>{additional_analyses}</b>' if additional_analyses > 0 else ''}
+💰 <b>Начислено токенов:</b> {credited_tokens}
+💳 <b>Текущий баланс:</b> {current_balance} ток.
 
 <b>Что входит:</b>
 {chr(10).join([f"• {feature}" for feature in plan['features']])}
@@ -1496,8 +1607,9 @@ async def manual_check_payment(callback: CallbackQuery, db: Database):
 <b>ID платежа:</b> <code>{payment.id}</code>
 
 💡 <b>Информация:</b>
-• Месячный лимит обновляется каждый месяц
-• Дополнительные анализы можно купить отдельно
+• Токены начисляются автоматически каждый месяц
+• Вы можете использовать токены для проведения анализов
+• Токены не сгорают и накапливаются на вашем счете
                     """
                     
                     logger.info(f"Платеж {payment_id} успешно обработан для пользователя {user_id}")
@@ -1591,6 +1703,33 @@ async def cancel_subscription(callback: CallbackQuery):
     await callback.message.edit_text(
         "❌ Действие отменено",
     )
+
+
+@router.callback_query(F.data == "unsubscribe")
+async def unsubscribe_autorenew(callback: CallbackQuery, db: Database):
+    """Отключить автопродление подписки (без немедленной деактивации текущего периода)."""
+    await callback.answer()
+    user_id = callback.from_user.id
+    try:
+        changed = await db.cancel_subscription(user_id)
+        if changed:
+            text = (
+                "🚫 <b>Автопродление отключено</b>\n\n"
+                "Подписка останется активной до конца оплаченного периода,\n"
+                "после чего продление выполняться не будет."
+            )
+        else:
+            text = (
+                "ℹ️ Автопродление уже отключено или активная подписка не найдена."
+            )
+        await callback.message.edit_text(text, parse_mode="HTML")
+    except Exception as e:
+        from logging import getLogger
+        getLogger(__name__).error(f"Ошибка отключения автопродления: {e}")
+        await callback.message.edit_text(
+            "❌ Не удалось отключить автопродление. Попробуйте позже.",
+            parse_mode="HTML"
+        )
 
 
 # Команда для тестовой активации премиума (для разработки)

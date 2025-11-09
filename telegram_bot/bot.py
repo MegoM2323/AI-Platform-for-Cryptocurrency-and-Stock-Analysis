@@ -67,6 +67,14 @@ async def on_startup(bot: Bot, db: Database):
         logger.debug(f"AI Model: {config.AI_MODEL}")
         logger.debug(f"Debug Settings: {config.get_debug_info()}")
 
+    # Запуск фонового воркера рекуррентных списаний
+    try:
+        from telegram_bot.handlers.payments import _recurring_billing_worker
+        asyncio.create_task(_recurring_billing_worker(db, bot))
+        logger.info("Фоновый воркер рекуррентных списаний запущен")
+    except Exception as e:
+        logger.error(f"Не удалось запустить воркер рекуррентных списаний: {e}")
+
 
 async def on_shutdown(bot: Bot):
     """Действия при остановке бота"""
